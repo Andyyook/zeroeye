@@ -1,3 +1,4 @@
+from typing import List, Dict, Optional, Union, Tuple, Any
 #!/usr/bin/env python3
 """
 Configuration file generator for the Tent of Trials platform.
