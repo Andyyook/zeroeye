@@ -86,7 +86,7 @@ def round_to_tick(value: float, tick_size: float) -> float:
     return round(value / tick_size) * tick_size
 
 def random_phone() -> str:
-    return f"+1-{random.randint(200, 999)}-{random.randint(100, 999)}-{random.randint(1000, 9999)}"
+    return f"+1-{self.random.randint(200, 999)}-{self.random.randint(100, 999)}-{self.random.randint(1000, 9999)}"
 
 def random_email(first: str, last: str) -> str:
     domain = random.choice(DOMAINS)
@@ -95,7 +95,7 @@ def random_email(first: str, last: str) -> str:
         f"{first.lower()}{last.lower()}",
         f"{first[0].lower()}{last.lower()}",
         f"{last.lower()}.{first.lower()}",
-        f"{first.lower()}{random.randint(1, 999)}",
+        f"{first.lower()}{self.random.randint(1, 999)}",
     ])
     return f"{pattern}@{domain}"
 
@@ -103,7 +103,7 @@ def random_datetime(start_year: int = 2023, end_year: int = 2024) -> datetime:
     start = datetime(start_year, 1, 1, tzinfo=timezone.utc)
     end = datetime(end_year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
     delta = end - start
-    return start + timedelta(seconds=random.randint(0, int(delta.total_seconds())))
+    return start + timedelta(seconds=self.random.randint(0, int(delta.total_seconds())))
 
 
 class DataGenerator:
