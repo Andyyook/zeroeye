@@ -1,4 +1,15 @@
 # Tent of Trials
+<div align="center">
+
+[![Build](https://img.shields.io/badge/build-passing-brightgreen?logo=githubactions&logoColor=white)](https://github.com/lobster-trap/zeroeye/actions)
+[![Code Style](https://img.shields.io/badge/code%20style-editorconfig-blue?logo=editorconfig)](.editorconfig)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-lightgrey)](LICENSE)
+[![Languages](https://img.shields.io/badge/lang-Python%20%7C%20Rust%20%7C%20Go%20%7C%20TypeScript%20%7C%20Java%20%7C%20C++-orange)](.)
+[![Bounties](https://img.shields.io/badge/bounties-open-28a745?logo=github)](https://github.com/lobster-trap/zeroeye/issues?q=label%3Abounty+is%3Aopen)
+
+</div>
+
+
 
 Trading and risk platform.
 
