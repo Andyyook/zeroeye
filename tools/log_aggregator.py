@@ -412,7 +412,31 @@ def parse_args():
     parser.add_argument("--format", choices=["json", "csv", "html"], default="json", help="Output format")
     parser.add_argument("--search", help="Search for a string in logs")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    parser.add_argument("--format", "-f", choices=["text", "jsonl"], default="text", help="Output format: text (human-readable) or jsonl (machine-parseable)")
     return parser.parse_args()
+
+
+
+
+    def output_jsonl(self, output_path=None):
+        """Write aggregated results as JSONL (one JSON object per line)."""
+        lines = []
+        for result in self.results:
+            record = {
+                "timestamp": result.get("timestamp", ""),
+                "level": result.get("level", "INFO"),
+                "source": result.get("source", ""),
+                "message": result.get("message", ""),
+                "metadata": result.get("metadata", {})
+            }
+            lines.append(json.dumps(record, ensure_ascii=False))
+        output = "\n".join(lines)
+        
+        if output_path:
+            with open(output_path, "w") as f:
+                f.write(output + "\n")
+            logger.info(f"JSONL output written to {output_path}")
+        return output
 
 
 def main():
