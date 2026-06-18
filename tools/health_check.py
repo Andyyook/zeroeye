@@ -38,6 +38,7 @@ import ssl
 import subprocess
 import sys
 import time
+import functools
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -300,12 +301,42 @@ def print_health_report(results: Dict[str, Any]):
     print()
 
 
+
+
+def with_retry(max_retries=3, timeout_secs=10, backoff_secs=2):
+    """Decorator for health check functions: retries on network errors with exponential backoff."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except (socket.timeout, ConnectionRefusedError, ConnectionError,
+                        TimeoutError, OSError) as e:
+                    last_error = e
+                    if attempt < max_retries and isinstance(e, (socket.timeout, ConnectionRefusedError, ConnectionError)):
+                        wait = backoff_secs * (2 ** attempt)
+                        print(f"  Retry {attempt+1}/{max_retries} for {func.__name__} in {wait:.1f}s...")
+                        time.sleep(wait)
+                    else:
+                        return "CRITICAL", str(e), 0
+                except Exception as e:
+                    return "WARNING", str(e), 0
+            return "CRITICAL", str(last_error), 0
+        return wrapper
+    return decorator
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Health check tool")
     parser.add_argument("--service", "-s", help="Check specific service only")
     parser.add_argument("--json", "-j", action="store_true", help="JSON output")
     parser.add_argument("--watch", "-w", action="store_true", help="Continuous monitoring")
     parser.add_argument("--interval", "-i", type=int, default=30, help="Check interval in seconds")
+    parser.add_argument("--retries", type=int, default=3, help="Max retries per check")
+    parser.add_argument("--timeout-secs", type=int, default=10, help="Per-check timeout in seconds")
+    parser.add_argument("--backoff-secs", type=int, default=2, help="Base backoff seconds between retries")
     parser.add_argument("--output", "-o", help="Output file path")
     return parser.parse_args()
 
@@ -317,7 +348,7 @@ def main():
         print(f"Continuous monitoring (interval: {args.interval}s). Press Ctrl+C to stop.")
         try:
             while True:
-                results = run_health_checks(args.service, args.json)
+                results = run_health_checks(args.service, args.json, args.retries, args.timeout_secs, args.backoff_secs)
                 if args.json:
                     print(json.dumps(results, indent=2))
                 else:
@@ -326,7 +357,7 @@ def main():
         except KeyboardInterrupt:
             print("\nMonitoring stopped")
     else:
-        results = run_health_checks(args.service, args.json)
+        results = run_health_checks(args.service, args.json, args.retries, args.timeout_secs, args.backoff_secs)
         if args.json:
             output = json.dumps(results, indent=2)
             print(output)
