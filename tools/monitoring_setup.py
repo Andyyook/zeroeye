@@ -147,12 +147,13 @@ RECOMMENDED_RECORDING_RULES: List[Dict[str, Any]] = [
     {"name": "job:http_error_rate:rate5m", "expr": "sum(rate(http_errors_total[5m])) by (job) / sum(rate(http_requests_total[5m])) by (job)"},
     {"name": "job:http_latency_p99:rate5m", "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job))"},
     {"name": "instance:memory_usage:ratio", "expr": "process_resident_memory_bytes / machine_memory_bytes"},
-    {"name": "instance:cpu_usage:ratio", "expr": "rate(process_cpu_seconds_total[5m])"},
-    {"name": "service:uptime:days", "expr": "time() - process_start_time_seconds{job=~'.+'}"},
-]
+
+# Validation patterns
+VALID_PROMQL_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*")
+SELF_DIVIDING_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*) *\/ *\1\b")
 
 
-def http_request(method: str, url: str, data: Any = None,
+# ---------------------------------------------------------------------------
                  headers: Optional[Dict[str, str]] = None) -> Any:
     if headers is None:
         headers = {}
@@ -317,20 +318,31 @@ def configure_alertmanager_notifications(alertmanager_url: str,
             *receivers,
         ],
     }
+        if not expr or not isinstance(expr, str):
+            print(f"  [FAIL] Rule '{name}' has missing or invalid expression")
+            failures += 1
+            continue
 
-    if dry_run:
-        print("Alertmanager configuration:")
-        print(json.dumps(config, indent=2))
-        return True
+        # Check for self-dividing expressions (e.g., metric / metric)
+        self_dividing_matches = SELF_DIVIDING_PATTERN.findall(expr)
+        if self_dividing_matches:
+            print(
+                f"  [FAIL] Rule '{name}' contains self-dividing expression: {expr}"
+            )
+            failures += 1
+            continue
 
+        # Basic PromQL syntax validation
+        if not expr.startswith(("(", "avg", "sum", "rate", "histogram_quantile",
     result = http_request(
         "POST",
-        f"{alertmanager_url}/api/v2/config",
-        data=config,
-    )
+            print(f"  [WARN] Rule '{name}' expression may be invalid: {expr}")
+            # Don't count as failure, just a warning
+            continue
 
-    if result is not None:
-        print("Alertmanager configuration updated")
+        print(f"  [PASS] Rule '{name}' expression looks valid")
+
+    if failures:
         return True
 
     print("Failed to update Alertmanager configuration", file=sys.stderr)
@@ -342,31 +354,12 @@ def backup_monitoring_config(output_dir: str, prometheus_url: str,
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        print(f"  {rule['name']}: {rule['expr']}")
-
-
-def validate_alert_expressions(rules: List[Dict[str, Any]]) -> List[str]:
-    """Validate alert expressions and return list of errors found."""
-    errors = []
-    for rule in rules:
-        expr = rule.get("expr", "")
-        name = rule.get("name", "unnamed")
-        # Check for self-dividing expressions (e.g., metric / metric)
-        parts = expr.split("/")
-        if len(parts) == 2:
-            left = parts[0].strip()
-            right = parts[1].split(">")[0].split("<")[0].split("==")[0].strip()
-            if left == right:
-                errors.append(
-                    f"Self-dividing expression in alert '{name}': {expr} "
-                    f"(left: {left}, right: {right})"
-                )
-    return errors
-
-
-def validate_prometheus_connection(url: str) -> bool:
-    """Validate that we can connect to Prometheus and basic queries work."""
-    try:
+    # Backup Prometheus rules (via API)
+    print("Backing up Prometheus configuration...")
+    rules_data = http_request("GET", f"{prometheus_url}/api/v1/rules")
+    if rules_data:
+        with open(os.path.join(output_dir, f"prometheus_rules_{timestamp}.json"), "w") as f:
+            json.dump(rules_data, f, indent=2)
         print("  Prometheus rules backed up")
 
     # Backup Grafana dashboards
@@ -378,52 +371,33 @@ def validate_prometheus_connection(url: str) -> bool:
 
         for db in dashboards:
             uid = db.get("uid")
-def validate_alerts(args: argparse.Namespace) -> None:
-    """Validate alert rules against a running Prometheus instance."""
-    print("Validating alert rules...")
-
-    # Validate expressions for common issues
-    expr_errors = validate_alert_expressions(RECOMMENDED_ALERT_RULES)
-    if expr_errors:
-        print("Expression validation errors found:")
-        for err in expr_errors:
-            print(f"  ERROR: {err}")
-        sys.exit(1)
-
-    if not validate_prometheus_connection(args.prometheus_url):
-        print("WARNING: Could not connect to Prometheus. Skipping remote validation.")
-        return
+            if uid:
+                dashboard = http_request("GET", f"{grafana_url}/api/dashboards/uid/{uid}",
+                                          headers={"Authorization": f"Bearer {grafana_api_key}"})
+                if dashboard:
+                    with open(os.path.join(dashboards_dir, f"{db['title']}.json"), "w") as f:
+                        json.dump(dashboard.get("dashboard", dashboard), f, indent=2)
 
         print(f"  {len(dashboards)} Grafana dashboards backed up to {dashboards_dir}")
 
     print(f"Backup completed: {output_dir}")
     return True
 
-        print(f"  Duration: {rule['duration']}")
-        print(f"  Severity: {rule['severity']}")
-        print()
 
-    print("All alert rules validated successfully.")
-
-
+def parse_args():
+    parser = argparse.ArgumentParser(description="Monitoring setup tool")
+    parser.add_argument("--prometheus-url", default=DEFAULT_PROMETHEUS_URL)
+    parser.add_argument("--alertmanager-url", default=DEFAULT_ALERTMANAGER_URL)
+    parser.add_argument("--grafana-url", default=DEFAULT_GRAFANA_URL)
     parser.add_argument("--grafana-api-key", default=os.environ.get("GRAFANA_API_KEY", ""))
     parser.add_argument("--slack-webhook", default=os.environ.get("SLACK_WEBHOOK", ""))
     parser.add_argument("--pagerduty-key", default=os.environ.get("PAGERDUTY_KEY", ""))
-def dry_run_alerts(args: argparse.Namespace) -> None:
-    """Show what alert rules would be applied without making changes."""
-    print("DRY RUN: Alert rules that would be applied:")
-
-    # Validate expressions for common issues
-    expr_errors = validate_alert_expressions(RECOMMENDED_ALERT_RULES)
-    if expr_errors:
-        print("Expression validation errors found:")
-        for err in expr_errors:
-            print(f"  ERROR: {err}")
-        sys.exit(1)
-
-    for rule in RECOMMENDED_ALERT_RULES:
-        print(f"\n  - {rule['name']}")
-        print(f    Expression: {rule['expr']}")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    parser.add_argument("--init", action="store_true", help="Initialize monitoring setup")
+    parser.add_argument("--check", action="store_true", help="Check monitoring health")
+    parser.add_argument("--alerts", action="store_true", help="Upload alert rules")
+    parser.add_argument("--dashboards", action="store_true", help="Upload Grafana dashboards")
+    parser.add_argument("--backup", action="store_true", help="Backup monitoring config")
     parser.add_argument("--output-dir", default="./monitoring_backup", help="Backup output directory")
     parser.add_argument("--validate", action="store_true", help="Validate monitoring configuration")
     parser.add_argument("--env", default="development", help="Target environment")
