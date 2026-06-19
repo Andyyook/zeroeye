@@ -40,11 +40,36 @@ try:
     HAS_TOML = True
 except ImportError:
     HAS_TOML = False
+try:
+    import jsonschema
+    HAS_JSONSCHEMA = True
+except ImportError:
+    HAS_JSONSCHEMA = False
 
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION SCHEMA
 # ---------------------------------------------------------------------------
+
+def load_schema(path=None):
+    if path:
+        with open(path) as f: return json.load(f)
+    sp = Path(__file__).resolve().parent.parent / "schemas" / "config-generator.json"
+    if sp.exists(): return json.loads(sp.read_text())
+    return None
+
+def validate_config(data, schema):
+    errors = []
+    if not HAS_JSONSCHEMA:
+        errors.append("jsonschema not installed (pip install jsonschema)")
+        return errors
+    if not schema:
+        errors.append("No schema loaded")
+        return errors
+    validator = jsonschema.Draft7Validator(schema)
+    for error in sorted(validator.iter_errors(data), key=str):
+        errors.append(f"{chr(46).join(str(p) for p in error.absolute_path)}: {error.message}")
+    return errors
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "app": {
@@ -311,6 +336,8 @@ def parse_args():
     parser.add_argument("--output", "-o", help="Output file path")
     parser.add_argument("--show-sensitive", action="store_true",
                        help="Show sensitive values (default: masked)")
+    parser.add_argument("--schema", type=str, default=None, help="Path to alternate JSON Schema")
+    parser.add_argument("--force", action="store_true", help="Generate even if validation fails")
     parser.add_argument("--stdout", action="store_true",
                        help="Print to stdout instead of file")
     return parser.parse_args()
@@ -338,6 +365,11 @@ def main():
         print(f"Unsupported format: {args.format}")
         return 1
 
+    schema = load_schema(args.schema)
+    errors = validate_config(display_config, schema)
+    if errors:
+        print("Validation errors:"); [print(f"  - {e}") for e in errors]
+        if not args.force: return 1
     output = output_fn(display_config)
     if args.stdout or not args.output:
         print(output)
