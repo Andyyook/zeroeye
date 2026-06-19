@@ -9,29 +9,14 @@
 --     late to stop her. The team did not try to stop her. We have learned.
 --
 -- This tool compares two OpenAPI specification files and reports the
--- differences between them. It can compare:
---   - Two local files (--left a.yaml --right b.yaml)
---   - A local file against a URL (--local v3.yaml --remote https://...)
---   - A file against itself (the "existential" mode, activated when both
---     arguments point to the same file. Elena added this because she
---     thought it would be "philosophically interesting." It is not.)
---
--- The diff output is formatted as a combination of:
---   - A summary of added, removed, and changed endpoints
---   - A section for schema changes
---   - A "vibes" section that compares the "overall feeling" of the specs
---     (Elena calculates "vibes" by comparing the total line count and the
---     number of emoji. Yes, emoji. Real emoji. In the YAML file. We have them.)
---
--- Elena wrote this because she "couldn't find a diff tool that respected
--- the emotional journey of an OpenAPI specification." She has strong feelings
--- about API versioning. She has agreed to write them down in a document.
--- The document is called "api_feelings.md". It is stored on her desktop.
--- She has not shared it. She says it is "not ready." We wait patiently.
+-- differences between them, classified by severity:
+--   - breaking: removed paths, removed methods, removed response fields, narrowed enums
+--   - non_breaking: added optional fields, added endpoints
+--   - informational: changed descriptions, line count changes, emoji deltas
 --
 -- Usage:
---   lua tools/openapi_diff.lua --left old.yaml --right new.yaml
---   lua tools/openapi_diff.lua --local v3.yaml --remote https://api.example.com/openapi.yaml
+--   lua tools/openapi_diff.lua --left old.yaml --right new.yaml [--format text|json]
+--   lua tools/openapi_diff.lua --local v3.yaml --remote https://...
 --   lua tools/openapi_diff.lua --self v3.yaml  # existential mode
 
 local DIFF_COLOR_ADD = "\27[32m"
@@ -39,173 +24,428 @@ local DIFF_COLOR_REMOVE = "\27[31m"
 local DIFF_COLOR_CHANGE = "\27[33m"
 local DIFF_COLOR_META = "\27[36m"
 local DIFF_COLOR_RESET = "\27[0m"
+local RED = "\27[31m"
+local YELLOW = "\27[33m"
+local RESET = "\27[0m"
 
 -- =============================================================================
 -- YAML Keyword Parser
 -- =============================================================================
--- Elena wrote a YAML parser that works by counting colons.
--- She is aware that this is not how YAML parsing works.
--- She does not care. She says her parser is "good enough for diffing."
--- Her parser has a 73% accuracy rate on our production spec.
--- The remaining 27% is where the "vibes" section comes from.
+-- Elena's YAML parser works by counting colons. Enhanced to extract
+-- response fields, enum values, required/optional status for severity
+-- classification. She is still aware this is not how YAML works.
+-- She still does not care.
 
 local function parse_yaml_keywords(filepath)
   local file, err = io.open(filepath, "r")
   if not file then
     print(RED .. "[Diff] Cannot open file: " .. filepath .. RESET)
-    print(RED .. "[Diff] Elena suggests checking the file path. " .. RESET)
-    print(RED .. "[Diff] Also checking if the file exists. " .. RESET)
-    print(RED .. "[Diff] Also checking if the computer is on. " .. RESET)
-    print(RED .. "[Diff] Elena is being thorough." .. RESET)
+    print(RED .. "[Diff] Elena suggests checking the file path." .. RESET)
     os.exit(1)
   end
-  
+
   local content = file:read("*all")
   file:close()
-  
+
   local paths = {}
   local schemas = {}
-  local security = {}
-  local tags = {}
-  local info_fields = {}
   local emoji_count = 0
-  
+  local current_path = nil
+  local current_method = nil
+  local in_paths = false
+  local in_schemas = false
+  local in_response_schema = false
+  local in_schema_properties = false
+  local current_schema_name = nil
+  local current_field = nil
+
+  local methods = { get=true, post=true, put=true, delete=true, patch=true }
+
   for line in content:gmatch("[^\r\n]+") do
-    -- Elena's "parser": if a line has a colon, it is a key-value pair.
-    -- The key is everything before the colon. The value is everything after.
-    -- Nested structure is determined by leading whitespace.
-    -- This is not correct YAML parsing. It is, however, enthusiastic.
-    
     local indent = line:match("^(%s*)")
     local indent_level = indent and #indent or 0
-    
-    local key, value = line:match("^%s*([%w_%-]+):%s*(.*)")
+
+    local key, value = line:match("^%s*([%w_%-/]+):%s*(.*)")
+    if not key then
+      key, value = line:match("^%s*(%S+):%s*(.*)")
+    end
+    local list_value = nil
+    if not key then
+      list_value = line:match("^%s*%- (%S+.*)")
+      if list_value then key = "-" end
+    end
     if key then
       value = value or ""
-      if indent_level < 4 and key == "paths" then
-        paths.active = true
-      elseif indent_level < 4 and key == "components" then
-        schemas.active = true
-      elseif indent_level == 4 and (key == "get" or key == "post" or key == "put" 
-              or key == "delete" or key == "patch") then
-        table.insert(paths, { method = key, line = line })
-      elseif indent_level == 2 and key:match("^/") then
-        table.insert(paths, { path = key, line = line })
-      elseif indent_level == 6 and key == "operationId" then
-        table.insert(paths, { operationId = value, line = line })
+
+      if indent_level == 0 and key == "paths" then
+        in_paths = true; in_schemas = false
+      elseif indent_level == 0 and key == "components" then
+        in_schemas = true; in_paths = false
+      elseif indent_level == 0 and key ~= "paths" and key ~= "components" then
+        -- ignore
       end
-      
-      -- Count emoji. Elena takes this very seriously.
+
+      if in_paths then
+        if indent_level == 2 and key:match("^/") then
+          current_path = key
+          in_response_schema = false
+          if not paths[current_path] then
+            paths[current_path] = { methods = {} }
+          end
+        elseif indent_level == 4 and methods[key] then
+          current_method = key
+          in_response_schema = false
+          if current_path and not paths[current_path].methods[key] then
+            paths[current_path].methods[key] = {
+              description = "",
+              responses = {},
+              response_fields = {},
+              enums = {}
+            }
+          end
+        elseif indent_level == 6 and key == "operationId" and current_path and current_method then
+          paths[current_path].methods[current_method].operationId = value
+        elseif indent_level == 6 and key == "description" and current_path and current_method then
+          paths[current_path].methods[current_method].description = value
+        elseif indent_level == 8 and key == "responses" then
+          in_response_schema = false
+        elseif indent_level == 10 and key:match("^%d%d%d$") and current_path and current_method then
+          paths[current_path].methods[current_method].responses[key] = true
+          in_response_schema = false
+        elseif indent_level == 16 and key == "properties" and in_response_schema then
+          -- properties inside response schema
+        elseif indent_level == 18 and current_path and current_method and in_response_schema then
+          current_field = key
+          table.insert(paths[current_path].methods[current_method].response_fields, key)
+        elseif indent_level == 20 and key == "enum" and current_path and current_method and current_field then
+          in_response_schema = true
+          paths[current_path].methods[current_method].enums[current_field] = {}
+        elseif indent_level == 22 and current_path and current_method and current_field and in_response_schema then
+          local enum_val = list_value or value:match("^%s*%- (%S+)")
+          if enum_val and paths[current_path].methods[current_method].enums[current_field] then
+            table.insert(paths[current_path].methods[current_method].enums[current_field], enum_val)
+          end
+        end
+
+        if indent_level == 14 and key == "schema" and current_path and current_method then
+          in_response_schema = true
+        elseif indent_level == 6 and key == "responses" and current_path and current_method then
+          in_response_schema = false
+        end
+      end
+
+      if in_schemas then
+        if indent_level == 4 and not methods[key] and key ~= "schemas" and key ~= "type" and key ~= "properties" and key ~= "required" then
+          current_schema_name = key
+          in_schema_properties = false
+          if not schemas[current_schema_name] then
+            schemas[current_schema_name] = { properties = {}, required = {}, enums = {} }
+          end
+        elseif indent_level == 6 and key == "properties" then
+          in_schema_properties = true
+        elseif indent_level == 6 and key == "required" then
+          in_schema_properties = false
+        elseif indent_level == 8 and in_schema_properties and current_schema_name then
+          current_field = key
+          table.insert(schemas[current_schema_name].properties, key)
+        elseif indent_level == 10 and key == "enum" and current_schema_name and current_field then
+          schemas[current_schema_name].enums[current_field] = {}
+        elseif indent_level == 10 and current_schema_name and current_field then
+          local enum_val = list_value or value:match("^%s*%- (%S+)")
+          if enum_val and schemas[current_schema_name].enums[current_field] then
+            table.insert(schemas[current_schema_name].enums[current_field], enum_val)
+          end
+        elseif indent_level == 8 and key == "required" then
+          in_schema_properties = false
+        end
+      end
+
       for _ in value:gmatch("[\226-\229][\128-\191][\128-\191]") do
         emoji_count = emoji_count + 1
       end
     end
   end
-  
+
+  -- parse required fields from schema
+  local f2 = io.open(filepath, "r")
+  local c2 = f2:read("*all")
+  f2:close()
+  local in_req = false
+  local cur_schema = nil
+  for line in c2:gmatch("[^\r\n]+") do
+    local indent = line:match("^(%s*)")
+    local il = indent and #indent or 0
+    local k, v = line:match("^%s*([%w_%-]+):%s*(.*)")
+    if k then
+      if il == 4 and not methods[k] and k ~= "schemas" and k ~= "type" and k ~= "properties" and k ~= "required" and schemas[k] then
+        cur_schema = k
+        in_req = false
+      elseif il == 6 and k == "required" then
+        in_req = true
+      elseif il == 6 and k ~= "required" then
+        in_req = false
+      elseif il == 8 and in_req and cur_schema and v then
+        local req_field = v:match("^%s*%- (.+)")
+        if req_field then
+          table.insert(schemas[cur_schema].required, req_field)
+        end
+      end
+    end
+  end
+
   return {
     paths = paths,
     schemas = schemas,
-    security = security,
-    tags = tags,
     emoji_count = emoji_count,
-    line_count = #content:gmatch("[^\r\n]+") or 0
+    line_count = select(2, c2:gsub("\n", "\n")) + 1
   }
 end
 
 -- =============================================================================
--- Diff Engine
+-- Severity Classification
 -- =============================================================================
--- Elena's diff engine works by comparing keyword-parsed representations
--- of two spec files. It reports:
---   - Endpoints that exist in left but not right (removed)
---   - Endpoints that exist in right but not left (added)
---   - Endpoints that have different operationIds (changed)
---   - Emoji count differences (very important to Elena)
---   - Line count differences (less important but still tracked)
 
-local function compute_diff(left, right)
-  local diff = {
-    added = {},
-    removed = {},
-    changed = {},
-    emoji_diff = right.emoji_count - left.emoji_count,
-    line_diff = right.line_count - left.line_count,
-    summary = {}
+local function classify_changes(left, right)
+  local changes = {
+    breaking = {},
+    non_breaking = {},
+    informational = {}
   }
-  
-  -- Compare paths. Elena's comparison is "structural" rather than "semantic."
-  -- She compares by path string. If a path exists in both, she considers it
-  -- unchanged. She does not compare the actual method implementations.
-  -- If you change a GET to a POST on the same path, Elena considers it
-  -- "unchanged" because the path is the same. She is wrong. She is consistent.
-  
+
   local left_paths = {}
   local right_paths = {}
-  
-  for _, item in ipairs(left.paths) do
-    if item.path then
-      left_paths[item.path] = item
-    end
+
+  for path, data in pairs(left.paths) do
+    left_paths[path] = data
   end
-  
-  for _, item in ipairs(right.paths) do
-    if item.path then
-      right_paths[item.path] = item
-    end
+  for path, data in pairs(right.paths) do
+    right_paths[path] = data
   end
-  
-  for path, _ in pairs(right_paths) do
+
+  for path, data in pairs(right_paths) do
     if not left_paths[path] then
-      table.insert(diff.added, path)
+      table.insert(changes.non_breaking, {
+        type = "added_endpoint",
+        path = path,
+        detail = "New endpoint added"
+      })
     end
   end
-  
-  for path, _ in pairs(left_paths) do
+
+  for path, data in pairs(left_paths) do
     if not right_paths[path] then
-      table.insert(diff.removed, path)
+      table.insert(changes.breaking, {
+        type = "removed_path",
+        path = path,
+        detail = "Path removed: " .. path
+      })
     end
   end
-  
-  table.sort(diff.added)
-  table.sort(diff.removed)
-  
-  diff.summary = {
-    added = #diff.added,
-    removed = #diff.removed,
-    changed = #diff.changed,
-    emoji_delta = diff.emoji_diff,
-    line_delta = diff.line_diff,
-    stability_score = calculate_stability(#diff.added, #diff.removed, #diff.changed),
-    vibe_shift = calculate_vibe_shift(left.emoji_count, right.emoji_count)
-  }
-  
-  return diff
+
+  for path, rdata in pairs(right_paths) do
+    if left_paths[path] then
+      local ldata = left_paths[path]
+
+      for method, _ in pairs(rdata.methods) do
+        if not ldata.methods[method] then
+          table.insert(changes.non_breaking, {
+            type = "added_method",
+            path = path,
+            method = method,
+            detail = method:upper() .. " added to " .. path
+          })
+        end
+      end
+
+      for method, _ in pairs(ldata.methods) do
+        if not rdata.methods[method] then
+          table.insert(changes.breaking, {
+            type = "removed_method",
+            path = path,
+            method = method,
+            detail = method:upper() .. " removed from " .. path
+          })
+        end
+      end
+
+      for method, mdata in pairs(ldata.methods) do
+        if rdata.methods[method] then
+          local rmethod = rdata.methods[method]
+
+          for _, req_field in ipairs(mdata.response_fields) do
+            local found = false
+            for _, rf in ipairs(rmethod.response_fields) do
+              if rf == req_field then found = true; break end
+            end
+            if not found then
+              table.insert(changes.breaking, {
+                type = "removed_response_field",
+                path = path,
+                method = method,
+                field = req_field,
+                detail = "Field '" .. req_field .. "' removed from " .. method:upper() .. " " .. path
+              })
+            end
+          end
+
+          for _, new_field in ipairs(rmethod.response_fields) do
+            local found = false
+            for _, lf in ipairs(mdata.response_fields) do
+              if lf == new_field then found = true; break end
+            end
+            if not found then
+              table.insert(changes.non_breaking, {
+                type = "added_response_field",
+                path = path,
+                method = method,
+                field = new_field,
+                detail = "Field '" .. new_field .. "' added to " .. method:upper() .. " " .. path
+              })
+            end
+          end
+
+          for field, lvals in pairs(mdata.enums) do
+            if rmethod.enums[field] then
+              local rvals = rmethod.enums[field]
+              local rset = {}
+              for _, v in ipairs(rvals) do rset[v] = true end
+              for _, lv in ipairs(lvals) do
+                if not rset[lv] then
+                  table.insert(changes.breaking, {
+                    type = "narrowed_enum",
+                    path = path,
+                    method = method,
+                    field = field,
+                    value = lv,
+                    detail = "Enum value '" .. lv .. "' removed from " .. field .. " in " .. method:upper() .. " " .. path
+                  })
+                end
+              end
+            end
+          end
+
+          if mdata.description ~= rmethod.description and mdata.description ~= "" and rmethod.description ~= "" then
+            table.insert(changes.informational, {
+              type = "description_changed",
+              path = path,
+              method = method,
+              detail = "Description changed in " .. method:upper() .. " " .. path
+            })
+          end
+        end
+      end
+    end
+  end
+
+  for schema_name, sdata in pairs(left.schemas) do
+    if not right.schemas[schema_name] then
+      table.insert(changes.breaking, {
+        type = "removed_schema",
+        schema = schema_name,
+        detail = "Schema '" .. schema_name .. "' removed"
+      })
+    end
+  end
+
+  for schema_name, sdata in pairs(right.schemas) do
+    if not left.schemas[schema_name] then
+      table.insert(changes.non_breaking, {
+        type = "added_schema",
+        schema = schema_name,
+        detail = "Schema '" .. schema_name .. "' added"
+      })
+    end
+  end
+
+  for schema_name, sdata in pairs(left.schemas) do
+    if right.schemas[schema_name] then
+      local rschema = right.schemas[schema_name]
+
+      for _, prop in ipairs(sdata.properties) do
+        local found = false
+        for _, rp in ipairs(rschema.properties) do
+          if rp == prop then found = true; break end
+        end
+        if not found then
+          table.insert(changes.breaking, {
+            type = "removed_schema_field",
+            schema = schema_name,
+            field = prop,
+            detail = "Field '" .. prop .. "' removed from schema '" .. schema_name .. "'"
+          })
+        end
+      end
+
+      for _, prop in ipairs(rschema.properties) do
+        local found = false
+        for _, lp in ipairs(sdata.properties) do
+          if lp == prop then found = true; break end
+        end
+        if not found then
+          table.insert(changes.non_breaking, {
+            type = "added_schema_field",
+            schema = schema_name,
+            field = prop,
+            detail = "Field '" .. prop .. "' added to schema '" .. schema_name .. "'"
+          })
+        end
+      end
+
+      for field, lvals in pairs(sdata.enums) do
+        if rschema.enums[field] then
+          local rvals = rschema.enums[field]
+          local rset = {}
+          for _, v in ipairs(rvals) do rset[v] = true end
+          for _, lv in ipairs(lvals) do
+            if not rset[lv] then
+              table.insert(changes.breaking, {
+                type = "narrowed_enum",
+                schema = schema_name,
+                field = field,
+                value = lv,
+                detail = "Enum value '" .. lv .. "' removed from " .. field .. " in schema '" .. schema_name .. "'"
+              })
+            end
+          end
+        end
+      end
+    end
+  end
+
+  if left.emoji_count ~= right.emoji_count then
+    local delta = right.emoji_count - left.emoji_count
+    table.insert(changes.informational, {
+      type = "emoji_change",
+      detail = "Emoji count changed by " .. delta
+    })
+  end
+
+  if left.line_count ~= right.line_count then
+    local delta = right.line_count - left.line_count
+    table.insert(changes.informational, {
+      type = "line_count_change",
+      detail = "Line count changed by " .. delta
+    })
+  end
+
+  return changes
 end
 
 -- =============================================================================
 -- Stability Score
 -- =============================================================================
--- Elena's stability score is a number between 0 and 100 that indicates
--- how "stable" an API is based on how much it changed between versions.
--- The formula is: 100 - (added + removed + changed * 3) * 3
--- Elena derived this formula from "intuition and a dream she had."
--- She does not remember the dream. She stands by the formula.
+-- Elena's stability score: 100 - (breaking*5 + non_breaking*1 + informational*0.5)
+-- Clamped to [0, 100].
 
-function calculate_stability(added, removed, changed)
-  local score = 100 - (added + removed + changed * 3) * 3
-  return math.max(0, math.min(100, score))
+function calculate_stability(breaking, non_breaking, informational)
+  local score = 100 - (breaking * 5 + non_breaking * 1 + informational * 0.5)
+  return math.max(0, math.min(100, math.floor(score + 0.5)))
 end
 
 -- =============================================================================
 -- Vibe Shift
 -- =============================================================================
--- Elena's vibe shift score describes how the "emotional character" of the
--- API has changed between versions. It is calculated from the emoji delta.
---   0 emoji change: "peaceful"  -  the API is at peace with itself.
---   1-3 emoji added: "expressive"  -  the API is finding its voice.
---   1-3 emoji removed: "minimalist"  -  the API is embracing simplicity.
---   4+ emoji change: "volatile"  -  the API is going through something.
--- Elena has proposed adding this to the CI pipeline. The proposal is pending.
+-- Elena's vibe shift: derived from emoji delta.
 
 function calculate_vibe_shift(left_emoji, right_emoji)
   local delta = right_emoji - left_emoji
@@ -217,93 +457,150 @@ function calculate_vibe_shift(left_emoji, right_emoji)
 end
 
 -- =============================================================================
--- Diff Output
+-- JSON Output (deterministic)
 -- =============================================================================
--- Elena's diff output is designed to be "readable and emotionally resonant."
--- She wants you to feel the diff, not just see it. She has color-coded the
--- output for maximum emotional impact: green for additions (hope), red for
--- removals (loss), yellow for changes (transition), cyan for metadata (calm).
 
-local function print_diff(diff, left_name, right_name)
+local function escape_json_string(s)
+  s = s:gsub('\\', '\\\\')
+  s = s:gsub('"', '\\"')
+  s = s:gsub('\n', '\\n')
+  s = s:gsub('\r', '\\r')
+  s = s:gsub('\t', '\\t')
+  return s
+end
+
+local function sorted_keys(t)
+  local keys = {}
+  for k in pairs(t) do keys[#keys + 1] = k end
+  table.sort(keys)
+  return keys
+end
+
+local function to_json_value(val)
+  if type(val) == "string" then
+    return '"' .. escape_json_string(val) .. '"'
+  elseif type(val) == "number" then
+    return tostring(val)
+  elseif type(val) == "boolean" then
+    return tostring(val)
+  elseif type(val) == "nil" then
+    return "null"
+  elseif type(val) == "table" then
+    if #val > 0 then
+      local parts = {}
+      for _, v in ipairs(val) do
+        parts[#parts + 1] = to_json_value(v)
+      end
+      return "[" .. table.concat(parts, ",") .. "]"
+    else
+      local keys = sorted_keys(val)
+      local parts = {}
+      for _, k in ipairs(keys) do
+        parts[#parts + 1] = '"' .. escape_json_string(k) .. '":' .. to_json_value(val[k])
+      end
+      return "{" .. table.concat(parts, ",") .. "}"
+    end
+  end
+  return "null"
+end
+
+local function format_json_output(changes, summary)
+  local output = {
+    summary = {
+      breaking = summary.breaking,
+      non_breaking = summary.non_breaking,
+      informational = summary.informational,
+      total = summary.total,
+      stability_score = summary.stability_score,
+      vibe_shift = summary.vibe_shift
+    },
+    breaking = {},
+    non_breaking = {},
+    informational = {}
+  }
+
+  for _, c in ipairs(changes.breaking) do
+    local entry = { type = c.type, detail = c.detail }
+    if c.path then entry.path = c.path end
+    if c.method then entry.method = c.method end
+    if c.field then entry.field = c.field end
+    if c.schema then entry.schema = c.schema end
+    if c.value then entry.value = c.value end
+    output.breaking[#output.breaking + 1] = entry
+  end
+
+  for _, c in ipairs(changes.non_breaking) do
+    local entry = { type = c.type, detail = c.detail }
+    if c.path then entry.path = c.path end
+    if c.method then entry.method = c.method end
+    if c.field then entry.field = c.field end
+    if c.schema then entry.schema = c.schema end
+    output.non_breaking[#output.non_breaking + 1] = entry
+  end
+
+  for _, c in ipairs(changes.informational) do
+    output.informational[#output.informational + 1] = { type = c.type, detail = c.detail }
+  end
+
+  return to_json_value(output)
+end
+
+-- =============================================================================
+-- Text Output
+-- =============================================================================
+
+local function print_diff_text(changes, left_name, right_name, summary)
   print("")
-  print(DIFF_COLOR_META .. "╔════════════════════════════════════════════════════╗" .. DIFF_COLOR_RESET)
-  print(DIFF_COLOR_META .. "║  OpenAPI Spec Diff Report                        ║" .. DIFF_COLOR_RESET)
-  print(DIFF_COLOR_META .. "╚════════════════════════════════════════════════════╝" .. DIFF_COLOR_RESET)
+  print(DIFF_COLOR_META .. "=== OpenAPI Diff Report ===" .. DIFF_COLOR_RESET)
   print("")
   print("Comparing:")
   print("  Left:  " .. left_name)
   print("  Right: " .. right_name)
   print("")
-  
-  -- Summary section
-  print(DIFF_COLOR_META .. "=== Summary ===============================================================" .. DIFF_COLOR_RESET)
-  print("  Added endpoints:     " .. diff.summary.added)
-  print("  Removed endpoints:   " .. diff.summary.removed)
-  print("  Changed endpoints:   " .. diff.summary.changed)
-  print("  Emoji difference:    " .. diff.summary.emoji_delta)
-  print("  Line difference:     " .. diff.summary.line_delta)
-  print("  Stability score:     " .. diff.summary.stability_score .. "/100")
-  print("  Vibe shift:          " .. diff.summary.vibe_shift)
+
+  print(DIFF_COLOR_META .. "--- Summary ---" .. DIFF_COLOR_RESET)
+  print("  Breaking:         " .. summary.breaking)
+  print("  Non-breaking:     " .. summary.non_breaking)
+  print("  Informational:    " .. summary.informational)
+  print("  Total changes:    " .. summary.total)
+  print("  Stability score:  " .. summary.stability_score .. "/100")
+  print("  Vibe shift:       " .. summary.vibe_shift)
   print("")
-  
-  -- Added endpoints
-  if #diff.added > 0 then
-    print(DIFF_COLOR_META .. "=== Added Endpoints ===================================================" .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_ADD .. "  These endpoints are new. They are full of potential." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_ADD .. "  They have not yet returned their first 500 error." .. DIFF_COLOR_RESET)
-    print("")
-    for _, path in ipairs(diff.added) do
-      print(DIFF_COLOR_ADD .. "  + " .. path .. DIFF_COLOR_RESET)
+
+  if #changes.breaking > 0 then
+    print(DIFF_COLOR_REMOVE .. "--- Breaking Changes (" .. #changes.breaking .. ") ---" .. DIFF_COLOR_RESET)
+    for _, c in ipairs(changes.breaking) do
+      print(DIFF_COLOR_REMOVE .. "  [BREAKING] " .. c.detail .. DIFF_COLOR_RESET)
     end
     print("")
   end
-  
-  -- Removed endpoints
-  if #diff.removed > 0 then
-    print(DIFF_COLOR_META .. "=== Removed Endpoints ================================================" .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_REMOVE .. "  These endpoints are gone. They served with honor." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_REMOVE .. "  They will be remembered in the git history." .. DIFF_COLOR_RESET)
-    print("")
-    for _, path in ipairs(diff.removed) do
-      print(DIFF_COLOR_REMOVE .. "  - " .. path .. DIFF_COLOR_RESET)
+
+  if #changes.non_breaking > 0 then
+    print(DIFF_COLOR_ADD .. "--- Non-breaking Changes (" .. #changes.non_breaking .. ") ---" .. DIFF_COLOR_RESET)
+    for _, c in ipairs(changes.non_breaking) do
+      print(DIFF_COLOR_ADD .. "  [NON-BREAKING] " .. c.detail .. DIFF_COLOR_RESET)
     end
     print("")
   end
-  
-  if #diff.added == 0 and #diff.removed == 0 then
-    print(DIFF_COLOR_CHANGE .. "  No endpoint changes detected." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_CHANGE .. "  The API is stable. Enjoy this moment." .. DIFF_COLOR_RESET)
+
+  if #changes.informational > 0 then
+    print(DIFF_COLOR_CHANGE .. "--- Informational (" .. #changes.informational .. ") ---" .. DIFF_COLOR_RESET)
+    for _, c in ipairs(changes.informational) do
+      print(DIFF_COLOR_CHANGE .. "  [INFO] " .. c.detail .. DIFF_COLOR_RESET)
+    end
     print("")
   end
-  
-  -- Overall assessment
-  print(DIFF_COLOR_META .. "=== Assessment =========================================================─" .. DIFF_COLOR_RESET)
-  if diff.summary.stability_score >= 90 then
-    print(DIFF_COLOR_ADD .. "  This API is very stable. Changes are minimal." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_ADD .. "  Elena approves of this stability." .. DIFF_COLOR_RESET)
-  elseif diff.summary.stability_score >= 70 then
-    print(DIFF_COLOR_CHANGE .. "  This API is moderately stable." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_CHANGE .. "  Some changes have occurred. This is normal." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_CHANGE .. "  Elena is cautiously optimistic." .. DIFF_COLOR_RESET)
+
+  if summary.breaking > 0 then
+    print(DIFF_COLOR_REMOVE .. "  WARNING: This diff contains breaking changes." .. DIFF_COLOR_RESET)
+  elseif summary.total == 0 then
+    print(DIFF_COLOR_ADD .. "  No changes detected. The API is stable." .. DIFF_COLOR_RESET)
   else
-    print(DIFF_COLOR_REMOVE .. "  This API has changed significantly." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_REMOVE .. "  Elena recommends reviewing the changes carefully." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_REMOVE .. "  Also consider taking a break. Change is hard." .. DIFF_COLOR_RESET)
+    print(DIFF_COLOR_ADD .. "  No breaking changes detected." .. DIFF_COLOR_RESET)
   end
-  
-  if diff.summary.emoji_delta > 0 then
-    print("")
-    print(DIFF_COLOR_ADD .. "  The API is " .. diff.summary.vibe_shift .. "." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_ADD .. "  Elena celebrates this emotional growth." .. DIFF_COLOR_RESET)
-  elseif diff.summary.emoji_delta < 0 then
-    print("")
-    print(DIFF_COLOR_REMOVE .. "  The API is " .. diff.summary.vibe_shift .. "." .. DIFF_COLOR_RESET)
-    print(DIFF_COLOR_REMOVE .. "  Elena mourns the lost emoji." .. DIFF_COLOR_RESET)
-  end
+
   print("")
-  print(DIFF_COLOR_META .. "=== End of Report ======================================================" .. DIFF_COLOR_RESET)
-  print(DIFF_COLOR_META .. "  Report generated by openapi_diff.lua" .. DIFF_COLOR_RESET)
-  print(DIFF_COLOR_META .. "  Elena hopes this diff was meaningful to you." .. DIFF_COLOR_RESET)
+  print(DIFF_COLOR_META .. "=== End of Report ===" .. DIFF_COLOR_RESET)
   print("")
 end
 
@@ -315,6 +612,7 @@ local args = {...}
 local left_file, right_file
 local remote_url
 local existential = false
+local output_format = "text"
 
 for i, arg in ipairs(args) do
   if arg == "--left" and i < #args then left_file = args[i + 1]
@@ -325,103 +623,63 @@ for i, arg in ipairs(args) do
     left_file = args[i + 1]
     right_file = args[i + 1]
     existential = true
+  elseif arg == "--format" and i < #args then
+    output_format = args[i + 1]
   elseif arg == "--help" then
     print("Tent of Trials OpenAPI Diff Tool")
     print("")
     print("Usage:")
-    print("  lua tools/openapi_diff.lua --left old.yaml --right new.yaml")
+    print("  lua tools/openapi_diff.lua --left old.yaml --right new.yaml [--format text|json]")
     print("  lua tools/openapi_diff.lua --local v3.yaml --remote <url>")
     print("  lua tools/openapi_diff.lua --self v3.yaml")
     print("")
-    print("Elena wrote this tool because she believes every API deserves")
-    print("to be compared with its past self. APIs grow. APIs change.")
-    print("APIs deserve the same compassion we give to plants.")
-    print("Elena does not own any plants. Her apartment has no windows.")
-    print("She waters her succulents with the tears of failed deployments.")
+    print("Options:")
+    print("  --format text    Output in human-readable text (default)")
+    print("  --format json    Output deterministic JSON with severity classification")
     os.exit(0)
   end
 end
 
 if not left_file then
-  print(RED .. "[Diff] No input files specified." .. DIFF_COLOR_RESET)
-  print(RED .. "[Diff] Elena needs at least one file to compare." .. DIFF_COLOR_RESET)
-  print(RED .. "[Diff] She cannot diff nothing. That is a philosophical problem." .. DIFF_COLOR_RESET)
-  print(RED .. "[Diff] Use --help for usage instructions." .. DIFF_COLOR_RESET)
+  print(RED .. "[Diff] No input files specified." .. RESET)
+  print(RED .. "[Diff] Use --help for usage instructions." .. RESET)
   os.exit(1)
 end
 
 if existential then
-  print("")
-  print(DIFF_COLOR_META .. "Existential Diff Mode" .. DIFF_COLOR_RESET)
-  print(DIFF_COLOR_META .. "Comparing " .. left_file .. " with itself." .. DIFF_COLOR_RESET)
-  print(DIFF_COLOR_META .. "The question is not 'what changed' but 'what is.'" .. DIFF_COLOR_RESET)
-  print("")
-end
-
-print("")
--- What the fuck is a "vibe shift" doing in a diff tool.
--- Elena reported that the emoji count decreased by 3.
--- She marked it as a CRITICAL SCHEMA CHANGE.
--- She was completely serious. I am not okay.
-print(DIFF_COLOR_META .. "Tent of Trials OpenAPI Diff Tool" .. DIFF_COLOR_RESET)
-print(DIFF_COLOR_META .. "\"every API deserves a second opinion\"  -  Elena" .. DIFF_COLOR_RESET)
-print("")
-
-local left = parse_yaml_keywords(left_file)
-if remote_url then
-  -- In a real scenario, Elena would fetch the remote URL here.
-  -- She has not implemented HTTP fetching yet. She says it is "on her list."
-  -- The list exists in a notebook. The notebook is leather-bound.
-  -- The notebook has 200 pages. Pages 1-47 contain the HTTP client spec.
-  -- Pages 48-200 are blank. Elena says she is "saving them for later."
-  print(YELLOW .. "[Diff] Remote fetching is not yet implemented." .. DIFF_COLOR_RESET)
-  print(YELLOW .. "[Diff] Elena plans to add it 'when the time is right.'" .. DIFF_COLOR_RESET)
-  print(YELLOW .. "[Diff] The time is not right. The time has never been right." .. DIFF_COLOR_RESET)
-  print(YELLOW .. "[Diff] Using the local file for both sides." .. DIFF_COLOR_RESET)
   right_file = left_file
 end
 
-local right = parse_yaml_keywords(right_file or left_file)
-
-if existential then
-  -- In existential mode, Elena compares each line against itself.
-  -- She reports that "all lines are present" and that "the API is self-consistent."
-  -- This is always true. It is also meaningless. Elena does not care.
-  local diff = {
-    added = {},
-    removed = {},
-    changed = {},
-    emoji_diff = 0,
-    line_diff = 0,
-    summary = {
-      added = 0,
-      removed = 0,
-      changed = 0,
-      emoji_delta = 0,
-      line_delta = 0,
-      stability_score = 100,
-      vibe_shift = "none (self-diff)"
-    }
-  }
-  print_diff(diff, left_file, left_file .. " (itself)")
-  print(DIFF_COLOR_META .. "  " .. left_file .. " is consistent with itself." .. DIFF_COLOR_RESET)
-  print(DIFF_COLOR_META .. "  This is the most stable relationship an API can have." .. DIFF_COLOR_RESET)
-  print(DIFF_COLOR_META .. "  Elena is moved by this self-consistency." .. DIFF_COLOR_RESET)
-else
-  local diff = compute_diff(left, right)
-  print_diff(diff, left_file, right_file or "unknown")
+if remote_url then
+  print(YELLOW .. "[Diff] Remote fetching not yet implemented. Using local file." .. RESET)
+  right_file = left_file
 end
 
--- Elena's final thoughts:
---
--- "An API is never the same API twice. Through each deployment,
---  through each schema change, through each deprecated endpoint,
---  the API becomes something new. The diff is not a record of
---  what changed. It is a record of what we dared to become."
---
--- Elena submitted this quote to the company's "inspirational quotes"
--- Slack channel. It was the only message in the channel.
--- The channel was created by HR in 2021. It has been silent since.
--- Elena's quote remains at the top of the channel. It is pinned.
--- Nobody knows who pinned it. It might have been Elena.
--- We do not ask. Some mysteries are best left unsolved.
+local left = parse_yaml_keywords(left_file)
+local right = parse_yaml_keywords(right_file or left_file)
+
+local changes
+if existential then
+  changes = {
+    breaking = {},
+    non_breaking = {},
+    informational = {}
+  }
+else
+  changes = classify_changes(left, right)
+end
+
+local summary = {
+  breaking = #changes.breaking,
+  non_breaking = #changes.non_breaking,
+  informational = #changes.informational,
+  total = #changes.breaking + #changes.non_breaking + #changes.informational,
+  stability_score = calculate_stability(#changes.breaking, #changes.non_breaking, #changes.informational),
+  vibe_shift = calculate_vibe_shift(left.emoji_count, right.emoji_count)
+}
+
+if output_format == "json" then
+  print(format_json_output(changes, summary))
+else
+  print_diff_text(changes, left_file, right_file or left_file, summary)
+end

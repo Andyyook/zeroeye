@@ -1,0 +1,108 @@
+openapi: "3.0.3"
+info:
+  title: Sample API
+  version: "2.0.0"
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      description: List all users with pagination
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  name:
+                    type: string
+                  email:
+                    type: string
+                  created_at:
+                    type: string
+  /users/{id}:
+    get:
+      operationId: getUser
+      description: Get user by ID
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  name:
+                    type: string
+                  role:
+                    type: string
+                    enum:
+                      - admin
+                      - user
+  /users/{id}/profile:
+    get:
+      operationId: getUserProfile
+      description: Get user profile
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bio:
+                    type: string
+                  avatar_url:
+                    type: string
+  /orders:
+    post:
+      operationId: createOrder
+      description: Create a new order
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  status:
+                    type: string
+                  total:
+                    type: number
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        created_at:
+          type: string
+      required:
+        - id
+        - name
+    Order:
+      type: object
+      properties:
+        id:
+          type: integer
+        status:
+          type: string
+      required:
+        - id
+        - status
