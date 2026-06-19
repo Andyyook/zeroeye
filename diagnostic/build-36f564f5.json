@@ -1,9 +1,7 @@
 {
   "commit": "36f564f5",
-  "decrypt_password": "decrypt_1781896560_36f564f5",
-  "diagnostic_logd": [
-    "diagnostic/build-36f564f5.logd"
-  ],
+  "password": "dec_1781896817_36f564f5",
+  "diagnostic_logd": "diagnostic/build-36f564f5.logd",
   "source": "build.py",
-  "timestamp": "2026-06-19T19:16:00Z"
+  "timestamp": "2026-06-19T19:20:17Z"
 }
