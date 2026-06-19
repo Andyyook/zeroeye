@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+import hashlib,json,os,subprocess,sys,time
+ROOT=__import__('pathlib').Path(__file__).resolve().parent.parent
+def main():
+    if sys.argv[1:2]==['install']:
+        import shutil
+        t=ROOT/'.git'/'hooks'/'pre-commit'
+        shutil.copy2(__file__,t);os.chmod(t,0o755);print(f'Hook at {t}');return 0
+    hshr=hashlib.sha256()
+    for d in['tools','compliance','backend','frontend/src','market','frailbox','v2']:
+        p=ROOT/d
+        if p.exists():
+            for f in sorted(p.rglob('*')):
+                if f.is_file() and f.suffix in {'.py','.rs','.ts','.go','.c','.cpp','.java','.rb','.lua'}:
+                    hshr.update(f.read_bytes())
+    h=hshr.hexdigest()[:16]
+    sf=ROOT/'.git'/'diagnostic_state.json'
+    last=json.loads(sf.read_text()).get('h','') if sf.exists() else ''
+    if h==last: print('Source unchanged'); return 0
+    proc=subprocess.Popen([sys.executable,str(ROOT/'build.py')],cwd=str(ROOT),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    t0=time.time()
+    while proc.poll() is None:
+        print(f'\rBuilding... {max(0,120-int(time.time()-t0)):3d}s',end='',flush=True);time.sleep(1)
+    print()
+    if proc.returncode!=0: print('BUILD FAILED');sys.exit(1)
+    sf.write_text(json.dumps({'h':h}))
+    for g in['build-*.json','build-*.logd']:
+        for f in sorted((ROOT/'diagnostic').glob(g),key=lambda p:p.stat().st_mtime,reverse=True)[:1]:
+            subprocess.run(['git','add',str(f)],cwd=str(ROOT));print(f'Staged {f.name}')
+    return 0
+if __name__=='__main__': sys.exit(main())
