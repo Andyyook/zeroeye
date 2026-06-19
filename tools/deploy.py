@@ -379,6 +379,8 @@ def parse_args():
     parser.add_argument("--skip-build", action="store_true", help="Skip build step")
     parser.add_argument("--skip-test", action="store_true", help="Skip test step")
     parser.add_argument("--skip-health", action="store_true", help="Skip health check")
+    parser.add_argument("--dry-run", action="store_true",
+        help="Print what would be done without executing")
     parser.add_argument("--rollback", action="store_true", help="Rollback instead of deploy")
     parser.add_argument("--version", help="Version to rollback to")
     parser.add_argument("--list", action="store_true", help="List deployments")
