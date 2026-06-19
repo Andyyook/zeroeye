@@ -1,9 +1,7 @@
 {
   "commit": "bc620252",
-  "decrypt_password": "decrypt_1781896534_bc620252",
-  "diagnostic_logd": [
-    "diagnostic/build-bc620252.logd"
-  ],
+  "password": "dec_1781896786_bc620252",
+  "diagnostic_logd": "diagnostic/build-bc620252.logd",
   "source": "build.py",
-  "timestamp": "2026-06-19T19:15:34Z"
+  "timestamp": "2026-06-19T19:19:46Z"
 }
