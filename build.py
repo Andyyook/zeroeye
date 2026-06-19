@@ -879,8 +879,8 @@ Diagnostic bundle:
         print(f"  {color(msg, Colors.GRAY)}")
     else:
         print(f"  {color('✓ All prerequisites found', Colors.GREEN)}")
-    if args.module == "all":
-        selected = MODULES
+    if args.output_dir: os.environ["BUILD_OUTPUT_DIR"] = args.output_dir; print(f"Output: {args.output_dir}")
+    if args.module == "all": selected = MODULES
     else:
         names = [n.strip() for n in args.module.split(",")]
         selected = [m for m in MODULES if m.name in names]
@@ -938,7 +938,7 @@ Diagnostic bundle:
         results.append((module.name, success, elapsed, output, binary))
 
     print_summary(results)
-
+    if args.skip_diagnostics: print("Skipping diagnostic generation"); return 0 if all(r[1] for r in results) else 1
     diagnostics_ok = generate_logd(results, args.verbose)
 
     return 0 if diagnostics_ok and all(r[1] for r in results) else 1
