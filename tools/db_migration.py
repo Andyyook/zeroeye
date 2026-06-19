@@ -254,6 +254,31 @@ def create_migration(description: str) -> str:
     return version
 
 
+
+def cmd_rollback(args):
+    sf = Path(__file__).resolve().parent.parent / ".migration_state.json"
+    if not sf.exists(): print("No state"); return 1
+    s = json.loads(sf.read_text())
+    if not s.get("applied",[]): print("Nothing"); return 1
+    l = s["applied"][-1]; v=l["version"]; d=l.get("description","")
+    md = Path(MIGRATIONS_DIR)
+    rf = sorted(md.glob(f"{v}_*.rollback.sql")) + sorted(md.glob(f"{v}_*.rollback.py"))
+    if not rf and not args.get("force"): print("No rollback file. Use --force."); return 1
+    if args.get("dry_run"):
+        print(f"[DRY-RUN] Roll back {v}_{d}")
+        for f in rf: print(f"[DRY-RUN] {f.name}")
+        print("[DRY-RUN] 1 migration"); return 0
+    for f in rf:
+        if f.suffix==".py":
+            import importlib.util
+            spec=importlib.util.spec_from_file_location(f.stem,str(f))
+            m=importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            if hasattr(m,"down"): m.down()
+    s["applied"]=s["applied"][:-1]
+    sf.write_text(json.dumps(s,indent=2))
+    print(f"Rolled back {v}_{d}"); return 0
+
 def main():
     parser = argparse.ArgumentParser(description="Database migration tool")
     parser.add_argument("--up", action="store_true", help="Apply all pending migrations")
@@ -295,6 +320,8 @@ def main():
         print("Seed data not yet implemented")
         return 1
 
+        if hasattr(args,"command") and args.command=="rollback":
+        return cmd_rollback(vars(args))
     parser.print_help()
     return 0
 
