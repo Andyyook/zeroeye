@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Build Diagnostic",
+  "type": "object",
+  "properties": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$"
+    },
+    "password": {
+      "type": "string",
+      "minLength": 8
+    },
+    "diagnostic_logd": {
+      "type": "string",
+      "pattern": "^diagnostic/build-[0-9a-f]{8}\\.logd$"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "build.py"
+      ]
+    },
+    "timestamp": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "commit",
+    "password",
+    "diagnostic_logd",
+    "source",
+    "timestamp"
+  ]
+}
