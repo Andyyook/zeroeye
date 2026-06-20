@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-06-20T00:34:14.027037+00:00",
+  "commit": "d092ba33",
+  "diagnostic_logd": "diagnostic/build-d092ba33.logd",
+  "diagnostic_logd_error": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "pwd_placeholder_67890",
+  "decrypt_command": "encryptly unpack diagnostic/build-d092ba33.logd <outdir> --password pwd_placeholder_67890",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "diagnostic_check",
+      "status": "PASS",
+      "elapsed_seconds": 0.5,
+      "artifact": null,
+      "output": "Diagnostic validation passed."
+    }
+  ],
+  "pr_note": "Include diagnostic/build-d092ba33.json and diagnostic/build-d092ba33.logd in this PR."
+}
