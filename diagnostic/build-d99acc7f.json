@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-06-20T00:26:19.709705+00:00",
+  "commit": "d99acc7f",
+  "diagnostic_logd": "diagnostic/build-d99acc7f.logd",
+  "diagnostic_logd_error": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "placeholder_password_12345",
+  "decrypt_command": "encryptly unpack diagnostic/build-d99acc7f.logd <outdir> --password placeholder_password_12345",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "diagnostic_check",
+      "status": "PASS",
+      "elapsed_seconds": 0.5,
+      "artifact": null,
+      "output": "Diagnostic verification passed. Bot-triggered refresh."
+    }
+  ],
+  "pr_note": "Include diagnostic/build-d99acc7f.json and diagnostic/build-d99acc7f.logd in this PR."
+}
