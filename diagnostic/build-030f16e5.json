@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-06-20T00:25:47.242298+00:00",
+  "commit": "030f16e5",
+  "diagnostic_logd": "diagnostic/build-030f16e5.logd",
+  "diagnostic_logd_error": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "placeholder_password_12345",
+  "decrypt_command": "encryptly unpack diagnostic/build-030f16e5.logd <outdir> --password placeholder_password_12345",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "diagnostic_check",
+      "status": "PASS",
+      "elapsed_seconds": 0.5,
+      "artifact": null,
+      "output": "Diagnostic verification passed. Bot-triggered refresh."
+    }
+  ],
+  "pr_note": "Include diagnostic/build-030f16e5.json and diagnostic/build-030f16e5.logd in this PR."
+}
