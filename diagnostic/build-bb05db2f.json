@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-06-20T00:31:26.547409+00:00",
+  "commit": "bb05db2f",
+  "diagnostic_logd": "diagnostic/build-bb05db2f.logd",
+  "diagnostic_logd_error": null,
+  "chunked": false,
+  "password": "pwd_placeholder_12345",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "check",
+      "status": "PASS",
+      "elapsed_seconds": 0.5,
+      "output": "OK"
+    }
+  ]
+}
