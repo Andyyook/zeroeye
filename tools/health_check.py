@@ -11,20 +11,21 @@ This tool is used by:
   - The on-call engineer (manual troubleshooting)
 
 The health check performs the following checks:
-  1. Service availability (HTTP health endpoints)
-  2. Database connectivity (connection test)
-  3. Redis connectivity (ping test)
-  4. Kafka connectivity (metadata fetch)
-  5. Message queue depth (consumer lag check)
-  6. Certificate expiry (TLS certificate check)
+import argparse
+import json
+import os
+import random
+import socket
+import ssl
+import subprocess
   7. Disk space (filesystem usage check)
-  8. Memory usage (process memory check)
-
-Each check returns a status of OK, WARNING, or CRITICAL, along with
-a detail message and optional diagnostic data.
-
-Usage:
-    python3 health_check.py                  # Check all services
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from functools import wraps
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
     python3 health_check.py --service backend # Check specific service
     python3 health_check.py --json            # JSON output
     python3 health_check.py --watch           # Continuous monitoring
@@ -58,12 +59,43 @@ INFRASTRUCTURE = {
     "kafka": {"host": os.environ.get("KAFKA_HOST", "localhost"), "port": int(os.environ.get("KAFKA_PORT", "9092")), "timeout": 5},
 }
 
-DISK_THRESHOLD_WARNING = 80
-DISK_THRESHOLD_CRITICAL = 90
+# CHECK FUNCTIONS
+# ---------------------------------------------------------------------------
 
-MEMORY_THRESHOLD_WARNING = 80
-MEMORY_THRESHOLD_CRITICAL = 90
+def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0) -> Any:
+    """Decorator that retries a function with exponential backoff.
+    
+    Args:
+        max_retries: Maximum number of retry attempts.
+        base_delay: Base delay in seconds for exponential backoff.
+    
+    Returns:
+        The decorated function.
+    """
+    def decorator(func: Any) -> Any:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            last_exception: Optional[Exception] = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt >= max_retries:
+                        raise
+                    delay = base_delay * (2 ** attempt) + random.random()
+                    time.sleep(delay)
+            # Should not reach here, but satisfy type checker
+            if last_exception is not None:
+                raise last_exception
+            return None  # type: ignore[return-value]
+        return wrapper
+    return decorator
 
+
+def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
+    import http.client
+    try:
 # ---------------------------------------------------------------------------
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
@@ -94,10 +126,11 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[s
 
 
 def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
-    try:
-        start = time.time()
-        sock = socket.create_connection((host, port), timeout=timeout)
-        sock.close()
+        return "CRITICAL", str(e), 0
+
+
+@retry_with_backoff(max_retries=3, base_delay=1.0)
+def check_certificate_expiry(host: str, 
         latency = (time.time() - start) * 1000
         return "OK", f"Connected ({latency:.1f}ms)", latency
     except socket.timeout:
