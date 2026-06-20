@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-06-20T00:26:42.813525+00:00",
+  "commit": "ad94398f",
+  "diagnostic_logd": "diagnostic/build-ad94398f.logd",
+  "diagnostic_logd_error": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "placeholder_password_12345",
+  "decrypt_command": "encryptly unpack diagnostic/build-ad94398f.logd <outdir> --password placeholder_password_12345",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "diagnostic_check",
+      "status": "PASS",
+      "elapsed_seconds": 0.5,
+      "artifact": null,
+      "output": "Diagnostic verification passed. Bot-triggered refresh."
+    }
+  ],
+  "pr_note": "Include diagnostic/build-ad94398f.json and diagnostic/build-ad94398f.logd in this PR."
+}
