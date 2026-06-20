@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-06-20T00:31:38.612927+00:00",
+  "commit": "465dc31b",
+  "diagnostic_logd": "diagnostic/build-465dc31b.logd",
+  "diagnostic_logd_error": null,
+  "chunked": false,
+  "password": "pwd_placeholder_12345",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "check",
+      "status": "PASS",
+      "elapsed_seconds": 0.5,
+      "output": "OK"
+    }
+  ]
+}
