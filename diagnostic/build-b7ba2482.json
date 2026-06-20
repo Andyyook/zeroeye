@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-06-20T00:26:50.420489+00:00",
+  "commit": "b7ba2482",
+  "diagnostic_logd": "diagnostic/build-b7ba2482.logd",
+  "diagnostic_logd_error": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "placeholder_password_12345",
+  "decrypt_command": "encryptly unpack diagnostic/build-b7ba2482.logd <outdir> --password placeholder_password_12345",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "diagnostic_check",
+      "status": "PASS",
+      "elapsed_seconds": 0.5,
+      "artifact": null,
+      "output": "Diagnostic verification passed. Bot-triggered refresh."
+    }
+  ],
+  "pr_note": "Include diagnostic/build-b7ba2482.json and diagnostic/build-b7ba2482.logd in this PR."
+}
