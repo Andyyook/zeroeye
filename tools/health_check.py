@@ -6,38 +6,39 @@ the overall system status.
 
 This tool is used by:
   - The Kubernetes liveness/readiness probes
-  - The deployment pipeline (post-deployment validation)
   - The monitoring system (periodic health checks)
   - The on-call engineer (manual troubleshooting)
 
+
 The health check performs the following checks:
-import argparse
-import json
-import os
-import random
-import socket
-import ssl
-import subprocess
+  1. Service availability (HTTP health endpoints)
+  2. Database connectivity (connection test)
+  2. Database connectivity (connection test)
+  3. Redis connectivity (ping test)
+  4. Kafka connectivity (metadata fetch)
+  5. Message queue depth (consumer lag check)
+  6. Certificate expiry (TLS certificate check)
   7. Disk space (filesystem usage check)
-import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
-from functools import wraps
-# ---------------------------------------------------------------------------
-# CONSTANTS
-# ---------------------------------------------------------------------------
-    python3 health_check.py --service backend # Check specific service
-    python3 health_check.py --json            # JSON output
+  8. Memory usage (process memory check)
+
+Each check returns a status of OK, WARNING, or CRITICAL, along with
+a detail message and optional diagnostic data.
     python3 health_check.py --watch           # Continuous monitoring
 """
 
+import functools
 import argparse
 import json
 import os
-import socket
-import ssl
+"""
+
 import subprocess
 import sys
+import time
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -59,31 +60,47 @@ INFRASTRUCTURE = {
     "kafka": {"host": os.environ.get("KAFKA_HOST", "localhost"), "port": int(os.environ.get("KAFKA_PORT", "9092")), "timeout": 5},
 }
 
+DISK_THRESHOLD_WARNING = 80
+DISK_THRESHOLD_CRITICAL = 90
+
+MEMORY_THRESHOLD_WARNING = 80
+MEMORY_THRESHOLD_CRITICAL = 90
+
+# ---------------------------------------------------------------------------
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
 
-def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0) -> Any:
+def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
+    import http.client
+# CHECK FUNCTIONS
+# ---------------------------------------------------------------------------
+
+def retry_with_exponential_backoff(
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 60.0,
+    exceptions: Tuple[type[BaseException], ...] = (Exception,),
+) -> Any:
     """Decorator that retries a function with exponential backoff.
     
     Args:
         max_retries: Maximum number of retry attempts.
-        base_delay: Base delay in seconds for exponential backoff.
-    
-    Returns:
-        The decorated function.
+        base_delay: Initial delay between retries in seconds.
+        max_delay: Maximum delay between retries in seconds.
+        exceptions: Tuple of exception types to catch and retry on.
     """
     def decorator(func: Any) -> Any:
-        @wraps(func)
+        @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            last_exception: Optional[Exception] = None
+            last_exception: Optional[BaseException] = None
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except Exception as e:
+                except exceptions as e:
                     last_exception = e
                     if attempt >= max_retries:
                         raise
-                    delay = base_delay * (2 ** attempt) + random.random()
+                    delay = min(base_delay * (2 ** attempt), max_delay)
                     time.sleep(delay)
             # Should not reach here, but satisfy type checker
             if last_exception is not None:
@@ -93,21 +110,14 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0) -> Any:
     return decorator
 
 
-def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
-    import http.client
-    try:
-# ---------------------------------------------------------------------------
-# CHECK FUNCTIONS
-# ---------------------------------------------------------------------------
+TRANSIENT_EXCEPTIONS = (
+    socket.timeout, ConnectionRefusedError, OSError, TimeoutError
+)
+
 
 def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
     import http.client
     try:
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
-        conn.request("GET", path)
-        resp = conn.getresponse()
-        status = resp.status
-        body = resp.read().decode("utf-8", errors="replace")[:200]
         conn.close()
 
         if status == 200:
@@ -129,10 +139,10 @@ def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]
         return "CRITICAL", str(e), 0
 
 
-@retry_with_backoff(max_retries=3, base_delay=1.0)
-def check_certificate_expiry(host: str, 
-        latency = (time.time() - start) * 1000
-        return "OK", f"Connected ({latency:.1f}ms)", latency
+@retry_with_exponential_backoff(max_retries=3, base_delay=1.0, exceptions=TRANSIENT_EXCEPTIONS)
+def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
+    try:
+        start = time.time()
     except socket.timeout:
         return "CRITICAL", f"Connection timeout ({timeout}s)", 0
     except ConnectionRefusedError:
@@ -143,10 +153,11 @@ def check_certificate_expiry(host: str,
 
 def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]:
     try:
-        ctx = ssl.create_default_context()
-        with socket.create_connection((host, port), timeout=10) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                cert = ssock.getpeercert()
+        return "CRITICAL", str(e), 0
+
+
+@retry_with_exponential_backoff(max_retries=3, base_delay=1.0, exceptions=TRANSIENT_EXCEPTIONS)
+def check_certificate_expiry(host: str, 
                 if not cert:
                     return "WARNING", "No certificate found", 0
 
