@@ -14,186 +14,182 @@
 - * TODO: The token refresh logic has a race condition when multiple tabs
 - * try to refresh simultaneously. The fix involves a shared worker or
 + * Token refresh is coordinated across tabs using BroadcastChannel with
-+ * a localStorage fallback to prevent duplicate refresh requests and
++ * a localStorage fallback to prevent race conditions when multiple tabs
   * broadcast channel coordination.
   */
  
-@@ -155,6 +155,20 @@
- const REFRESH_THRESHOLD = 60; // seconds before expiry to attempt refresh
- 
- let currentTokens: AuthTokens | null = null;
+@@ -163,6 +163,20 @@ let currentTokens: AuthTokens | null = null;
  let currentUser: User | null = null;
  let refreshTimer: number | null = null;
  let authListeners: Array<(user: User | null) => void> = [];
-+
-+// Cross-tab refresh coordination
-+const BROADCAST_CHANNEL_NAME = 'tot_auth_refresh';
-+const REFRESH_LOCK_KEY = 'tot_auth_refresh_lock';
-+const REFRESH_RESULT_KEY = 'tot_auth_refresh_result';
-+const REFRESH_LOCK_TIMEOUT = 10000; // 10 seconds max lock hold
-+
 +let inFlightRefresh: Promise<AuthTokens> | null = null;
++
++// Cross-tab coordination
++const BROADCAST_CHANNEL_NAME = 'tot_auth_refresh';
++const STORAGE_EVENT_KEY = 'tot_auth_refresh_event';
 +let broadcastChannel: BroadcastChannel | null = null;
-+let isRefreshing = false;
++let isRefreshing: boolean = false;
 +
 +// Initialize broadcast channel for cross-tab coordination
 +try {
 +  broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
 +} catch {
-+  // BroadcastChannel not supported, will use localStorage fallback
++  // BroadcastChannel not supported, will fall back to localStorage events
++  broadcastChannel = null;
 +}
  
  // ---------------------------------------------------------------------------
  // HELPERS
-@@ -195,6 +209,163 @@
+@@ -210,6 +224,16 @@ function storeTokens(tokens: AuthTokens): void {
    }
  }
  
-+// ---------------------------------------------------------------------------
-+// CROSS-TAB COORDINATION
-+// ---------------------------------------------------------------------------
-+
-+interface RefreshResult {
-+  tokens: AuthTokens;
-+  timestamp: number;
-+}
-+
-+interface RefreshLock {
-+  tabId: string;
-+  acquiredAt: number;
-+}
-+
-+function generateTabId(): string {
-+  return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-+}
-+
-+const tabId = generateTabId();
-+
-+function acquireRefreshLock(): boolean {
-+  const now = Date.now();
-+  const raw = localStorage.getItem(REFRESH_LOCK_KEY);
-+  if (raw) {
-+    try {
-+      const lock: RefreshLock = JSON.parse(raw);
-+      // If lock is still valid, we can't acquire
-+      if (now - lock.acquiredAt < REFRESH_LOCK_TIMEOUT) {
-+        return false;
-+      }
-+      // Lock expired, steal it
-+    } catch {
-+      // Invalid lock, steal it
-+    }
-+  }
-+  const newLock: RefreshLock = { tabId, acquiredAt: now };
-+  localStorage.setItem(REFRESH_LOCK_KEY, JSON.stringify(newLock));
-+  // Double-check we got the lock (race condition check)
-+  const check = localStorage.getItem(REFRESH_LOCK_KEY);
-+  if (check) {
-+    try {
-+      const checkLock: RefreshLock = JSON.parse(check);
-+      return checkLock.tabId === tabId;
-+    } catch {
-+      return false;
-+    }
-+  }
-+  return false;
-+}
-+
-+function releaseRefreshLock(): void {
-+  const raw = localStorage.getItem(REFRESH_LOCK_KEY);
-+  if (raw) {
-+    try {
-+      const lock: RefreshLock = JSON.parse(raw);
-+      if (lock.tabId === tabId) {
-+        localStorage.removeItem(REFRESH_LOCK_KEY);
-+      }
-+    } catch {
-+      // Ignore
-+    }
-+  }
-+}
-+
-+function storeRefreshResult(tokens: AuthTokens): void {
-+  const result: RefreshResult = { tokens, timestamp: Date.now() };
-+  localStorage.setItem(REFRESH_RESULT_KEY, JSON.stringify(result));
-+}
-+
-+function getRefreshResult(): RefreshResult | null {
-+  const raw = localStorage.getItem(REFRESH_RESULT_KEY);
-+  if (!raw) return null;
++function storeTokensForBroadcast(tokens: AuthTokens): void {
++  storeTokens(tokens);
++  // Also store in localStorage for cross-tab synchronization
 +  try {
-+    const result: RefreshResult = JSON.parse(raw);
-+    // Result is valid for 30 seconds
-+    if (Date.now() - result.timestamp < 30000) {
-+      return result;
-+    }
++    localStorage.setItem(TOKEN_KEY, JSON.stringify(tokens));
 +  } catch {
-+    // Ignore
++    // Ignore storage errors
 +  }
-+  return null;
 +}
 +
-+function broadcastRefreshResult(tokens: AuthTokens): void {
+ function loadTokens(): AuthTokens | null {
+   if (currentTokens) return currentTokens;
+   try {
+@@ -244,6 +268,16 @@ function clearStoredAuth(): void {
+   }
+ }
+ 
++function broadcastRefreshResult(tokens: AuthTokens | null, error: boolean = false): void {
++  const message = { type: 'auth_refresh", tokens, error, timestamp: Date.now() };
 +  if (broadcastChannel) {
-+    try {
-+      broadcastChannel.postMessage({ type: 'refresh_success', tokens, timestamp: Date.now() });
-+    } catch {
-+      // Ignore broadcast errors
-+    }
++    broadcastChannel.postMessage(message);
 +  }
-+  // Also store in localStorage for tabs that missed the broadcast
-+  storeRefreshResult(tokens);
-+}
-+
-+function broadcastRefreshFailure(): void {
-+  if (broadcastChannel) {
-+    try {
-+      broadcastChannel.postMessage({ type: 'refresh_failure', timestamp: Date.now() });
-+    } catch {
-+      // Ignore broadcast errors
-+    }
++  // Also use localStorage as fallback for cross-tab communication
++  try {
++    localStorage.setItem(STORAGE_EVENT_KEY, JSON.stringify(message));
++    // Clean up after a short delay to avoid stale events
++    setTimeout(() => {
++      try {
++        localStorage.removeItem(STORAGE_EVENT_KEY);
++      } catch {
++        // Ignore
++      }
++    }, 5000);
++  } catch {
++    // Ignore storage errors
 +  }
 +}
-+
-+function setupBroadcastListener(): void {
-+  if (!broadcastChannel) return;
-+  
-+  broadcastChannel.onmessage = (event) => {
-+    if (!event.data || typeof event.data !== 'object') return;
-+    
-+    if (event.data.type === 'refresh_success' && event.data.tokens) {
-+      // Another tab successfully refreshed, adopt the tokens
-+      const tokens: AuthTokens = event.data.tokens;
-+      storeTokens(tokens);
-+      scheduleRefresh(tokens);
-+      notifyListeners();
-+    } else if (event.data.type === 'refresh_failure') {
-+      // Another tab failed to refresh, we might need to handle this
-+      // But don't clear tokens here - let the individual tab handle it
-+    }
-+  };
-+}
-+
-+// Initialize broadcast listener
-+setupBroadcastListener();
 +
  // ---------------------------------------------------------------------------
- // PUBLIC API
+ // TOKEN REFRESH
  // ---------------------------------------------------------------------------
-@@ -240,6 +411,7 @@
-   currentTokens = tokens;
-   currentUser = user;
-   storeTokens(tokens);
-+  storeRefreshResult(tokens);
-   scheduleRefresh(tokens);
-   notifyListeners();
-   return user;
-@@ -252,6 +424,7 @@
-   currentTokens = null;
-   currentUser = null;
-   localStorage.removeItem(TOKEN_KEY);
-+  localStorage.removeItem(REFRESH_RESULT_KEY);
-   if (refreshTimer) {
-     clearTimeout(refreshTimer);
-     refreshTimer = null;
-@@ -270,6 +
+@@ -252,6 +286,7 @@ function clearStoredAuth(): void {
+  * Refresh the access token using the refresh token.
+  * This is called automatically before the token expires.
+  */
++<<<<<<< SEARCH
+ export async function refreshTokens(): Promise<AuthTokens> {
+   const tokens = loadTokens();
+   if (!tokens?.refreshToken) {
+@@ -274,6 +309,163 @@ export async function refreshTokens(): Promise<AuthTokens> {
+     throw error;
+   }
+ }
++=======
++export async function refreshTokens(): Promise<AuthTokens> {
++  // If there's already an in-flight refresh, share its result
++  if (inFlightRefresh) {
++    return inFlightRefresh;
++  }
++
++  // Create the in-flight promise so concurrent callers share it
++  inFlightRefresh = performRefresh();
++
++  try {
++    const result = await inFlightRefresh;
++    return result;
++  } finally {
++    inFlightRefresh = null;
++  }
++}
++
++async function performRefresh(): Promise<AuthTokens> {
++  const tokens = loadTokens();
++  if (!tokens?.refreshToken) {
++    throw new Error('No refresh token available');
++  }
++
++  // Check if another tab is already refreshing
++  if (isRefreshing) {
++    // Wait for the other tab's result via broadcast or storage event
++    return waitForRefreshResult();
++  }
++
++  isRefreshing = true;
++
++  try {
++    const response = await post<AuthTokens>('/auth/refresh', {
++      refreshToken: tokens.refreshToken,
++    });
++
++    const newTokens: AuthTokens = {
++      ...response,
++      expiresIn: response.expiresIn || 3600,
++    };
++
++    storeTokensForBroadcast(newTokens);
++    scheduleRefresh(newTokens);
++    broadcastRefreshResult(newTokens, false);
++
++    return newTokens;
++  } catch (error) {
++    // On refresh failure, don't clear tokens immediately - another tab
++    // might have a successful in-flight refresh
++    broadcastRefreshResult(null, true);
++    throw error;
++  } finally {
++    isRefreshing = false;
++  }
++}
++
++function waitForRefreshResult(): Promise<AuthTokens> {
++  return new Promise((resolve, reject) => {
++    const timeout = setTimeout(() => {
++      cleanup();
++      reject(new Error('Timeout waiting for cross-tab refresh'));
++    }, 30000); // 30 second timeout
++
++    function onBroadcast(event: MessageEvent) {
++      if (event.data?.type === 'auth_refresh') {
++        if (event.data.error) {
++          // Another tab failed, but we might still have valid tokens
++          const tokens = loadTokens();
++          if (tokens && !isTokenExpired(tokens.accessToken)) {
++            cleanup();
++            resolve(tokens);
++          }
++          // Otherwise keep waiting or let timeout handle it
++        } else if (event.data.tokens) {
++          cleanup();
++          storeTokens(event.data.tokens);
++          scheduleRefresh(event.data.tokens);
++          resolve(event.data.tokens);
++        }
++      }
++    }
++
++    function onStorage(event: StorageEvent) {
++      if (event.key === TOKEN_KEY && event.newValue) {
++        try {
++          const tokens = JSON.parse(event.newValue) as AuthTokens;
++          cleanup();
++          storeTokens(tokens);
++          scheduleRefresh(tokens);
++          resolve(tokens);
++        } catch {
++          // Ignore parse errors
++        }
++      } else if (event.key === STORAGE_EVENT_KEY && event.newValue) {
++
