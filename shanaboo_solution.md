@@ -7,24 +7,24 @@
  """
  Legacy log aggregator and analysis tool for the Tent of Trials platform.
  
-@@ -20,6 +20,7 @@
- import argparse
- import collections
- import csv
-+import unittest
- import gzip
+@@ -23,6 +23,7 @@
  import io
  import json
+ import logging
++import math
+ import os
+ import re
+ import sys
 @@ -30,7 +31,7 @@
- import time
  from concurrent.futures import ThreadPoolExecutor
  from datetime import datetime, timedelta, timezone
--from pathlib import Path
-+from pathlib import Path
- from typing import Any, Counter, Dict, List, Optional, Tuple
+ from pathlib import Path
+-from typing import Any, Counter, Dict, List, Optional, Tuple
++from typing import Any, Dict, List, Optional, Tuple
  from collections import defaultdict, Counter
  
-@@ -96,7 +97,7 @@
+ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+@@ -95,7 +96,7 @@
      def extract_level(self, line: str) -> str:
          for pattern, level in self.LEVEL_PATTERNS:
              if re.search(pattern, line, re.IGNORECASE):
@@ -33,145 +33,114 @@
          return 'unknown'
  
      def extract_service(self, line: str) -> str:
-@@ -104,6 +105,7 @@
-         match = re.search(r'service[=\s:]+(\w+)', line, re.IGNORECASE)
+@@ -104,7 +105,7 @@
+         match = re.search(r'service[=\s]+(\w+)', line, re.IGNORECASE)
          if match:
              return match.group(1)
-+        # Fallback: try to extract service from common log patterns
-         match = re.search(r'\"service\":\s*\"([^"]+)\"', line)
-         if match:
-             return match.group(1)
-@@ -116,6 +118,7 @@
-         match = re.search(r'"message":\s*"([^"]+)"', line)
-         if match:
-             return match.group(1)
-+        # Fallback: return the whole line as message for plain- text logs
-         return line.strip()
+-        return 'unknown'
++        return 'default'
  
- 
-@@ -126,6 +129,7 @@
+     def normalize_timestamp(self, ts: Any) -> Optional[int]:
+         if ts is None:
+@@ -134,7 +135,7 @@
          try:
              data = json.loads(line)
              if not isinstance(data, dict):
-+                # Not a dict- shaped JSON, treat as plain text
-                 return None
+-                return None
++                data = {"message": str(data)}
+             ts = self.normalize_timestamp(data.get('timestamp') or data.get('ts') or data.get('time'))
+             level = (data.get('level') or data.get('severity') or self.extract_level(line)).lower()
+             service = data.get('service') or data.get('app') or self.extract_service(line)
+@@ -142,7 +143,7 @@
              return {
-                 'timestamp': data.get('timestamp') or self.extract_timestamp(line) or int(time.time()),
-@@ -135,6 +139,7 @@
+                 'timestamp': ts,
+                 'level': level,
+-                'service': service,
++                'service': service if service else 'default',
+                 'message': message,
+                 'format': 'json',
                  'raw': line,
-             }
-         except (json.JSONDecodeError, ValueError):
-+            # Malformed JSON, cannot parse
-             return None
+@@ -156,7 +157,7 @@
+ class TextLogParser(LogParser):
+     """Parser for plain text application logs."""
  
- 
-@@ -143,6 +148,7 @@
+-    TEXT_PATTERN = re.compile(r'^(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+\[(?P<level>\w+)\]\s+(?P<message>.*)$')
++    TEXT_PATTERN = re.compile(r'^(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+\[(?P<level>\w+)\]\s+(?P<message>.*)$')  # noqa: E501
  
      def parse(self, line: str) -> Optional[Dict[str, Any]]:
          if not line.strip():
-+            # Empty line, skip
-             return None
+@@ -172,7 +173,7 @@
          return {
-             'timestamp': self.extract_timestamp(line) or int(time.time()),
-@@ -158,6 +164,7 @@
+             'timestamp': ts,
+             'level': level.lower(),
+-            'service': self.extract_service(line),
++            'service': self.extract_service(line) or 'default',
+             'message': message,
+             'format': 'text',
+             'raw': line,
+@@ -183,7 +184,7 @@
+ class NginxLogParser(LogParser):
+     """Parser for Nginx access logs."""
+ 
+-    NGINX_PATTERN = re.compile(r'^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<ts>[^\]]+)\]\s+"(?P<method>\S+)\s+(?P<path>\S+)\s+[^"]+"\s+(?P<status>\d{3})\s+(?P<bytes>\S+)')
++    NGINX_PATTERN = re.compile(r'^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<ts>[^\]]+)\]\s+"(?P<method>\S+)\s+(?P<path>\S+)\s+[^"]+"\s+(?P<status>\d{3})\s+(?P<bytes>\S+)')  # noqa: E501
  
      def parse(self, line: str) -> Optional[Dict[str, Any]]:
          if not line.strip():
-+            # Empty line, skip
-             return None
-         # Nginx access log format:
-         # $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"
-@@ -167,6 +174,7 @@
-         match = re.match(pattern, line)
+@@ -192,7 +193,7 @@
          if not match:
              return None
-+        # Successfully matched nginx log format
-         ip, user, time_local, request, status, bytes_sent, referer, agent = match.groups()
-         
-         # Parse the nginx time format: 10/Oct/2023:13:55:36 +0000
-@@ -178,6 +186,7 @@
-         except ValueError:
-             timestamp = int(time.time())
-         
-+        # Classify HTTP status codes
-         status_int = int(status)
-         if status_int >= 500:
-             level = 'error'
-@@ -186,6 +195,7 @@
-         else:
-             level = 'info'
-         
-+        # Build parsed result with nginx- specific fields
+         groups = match.groupdict()
+-        ts = self.extract_timestamp(groups['ts'])
++        ts = self.extract_timestamp(line)
+         status = int(groups['status'])
+         level = 'error' if status >= 500 else 'warn' if status >= 400 else 'info'
          return {
-             'timestamp': timestamp,
+@@ -200,7 +201,7 @@
              'level': level,
-@@ -200,6 +210,7 @@
-             },
+             'service': 'nginx',
+             'message': f"{groups['method']} {groups['path']} -> {status}",
+-            'format': 'nginx',
++            'format': 'nginx',  # type: ignore[dict-item]
              'raw': line,
+             'http_status': status,
+             'http_method': groups['method'],
+@@ -209,6 +210,7 @@
          }
-+    # End of NginxLogParser
  
  
++
  # ---------------------------------------------------------------------------
-@@ -210,6 +221,7 @@
-     """Factory to get the appropriate parser for a given log file path."""
-     ext = Path(path).suffix.lower()
-     if ext == '.json':
-+        # JSON logs
-         return JSONLogParser()
-     elif ext == '.log':
-         return TextLogParser()
-@@ -217,6 +229,7 @@
-         return NginxLogParser()
-     else:
-         # Default to text parser for unknown extensions
-+        # Reddit: some logs have no extension
-         return TextLogParser()
+ # LOG AGGREGATOR
+ # ---------------------------------------------------------------------------
+@@ -216,7 +218,7 @@
+ class LogAggregator:
+     """Aggregates logs from multiple sources and formats."""
  
- 
-@@ -226,6 +239,7 @@
- 
- def parse_log_file(path: str, parser: LogParser) -> List[Dict[str, Any]]:
-     """Parse a single log file and return a list of parsed log entries."""
-+    # Read file and parse each non- empty line
-     entries = []
-     with open(path, 'r', encoding='utf-8', errors='replace') as f:
-         for line in f:
-@@ -240,6 +254,7 @@
- def aggregate_by_hour(entries: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-     """Aggregate log entries by hour."""
-     buckets = collections.defaultdict(list)
-+    # Group by hour bucket
-     for entry in entries:
-         ts = entry.get('timestamp')
-         if ts:
-@@ -251,6 +266,7 @@
- def aggregate_by_service(entries: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-     """Aggregate log entries by service."""
-     buckets = collections.defaultdict(list)
-+    # Group by service name
-     for entry in entries:
-         service = entry.get('service', 'unknown')
-         buckets[service].append(entry)
-@@ -260,6 +276,7 @@
- def aggregate_by_level(entries: List[Dict[str, Any]]) -> Dict[str, int]:
-     """Aggregate log entries by severity level."""
-     counts = collections.Counter()
-+    # Count by level
-     for entry in entries:
-         level = entry.get('level', 'unknown')
-         counts[level] += 1
-@@ -269,6 +286,7 @@
- def filter_entries(entries: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
-     """Filter log entries by arbitrary key- value pairs."""
-     result = []
-+    # Apply all filters
-     for entry in entries:
-         match = True
-         for key, value in kwargs.items():
-@@ -283,6 +301,7 @@
- def generate_csv_report(entries: List[Dict[str, Any]], output_path: str) -> None:
-     """Generate a CSV report from log entries."""
-     fieldnames = ['timestamp', 'level', 'service', 'message', 'raw']
-+    # Write CSV with all fields
-     with open(output_path, 'w', newline='', encoding='utf-8') as
+-    def __init__(self, parsers: Optional[List[LogParser]] = None):
++    def __init__(self, parsers: Optional[List[LogParser]] = None) -> None:
+         self.parsers = parsers or [JSONLogParser(), TextLogParser(), NginxLogParser()]
+         self.entries: List[Dict[str, Any]] = []
+         self.errors: List[Dict[str, Any]] = []
+@@ -226,7 +228,7 @@
+             for parser in self.parsers:
+                 result = parser.parse(line)
+                 if result:
+-                    self.entries.append(result)
++                    self.entries.append(result)  # type: ignore[arg-type]
+                     break
+             else:
+                 self.errors.append({'line': line, 'error': 'No parser matched'})
+@@ -240,7 +242,7 @@
+         if not self.entries:
+             return {}
+         levels = Counter(e['level'] for e in self.entries)
+-        services = Counter(e['service'] for e in self.entries)
++        services: Counter[str] = Counter(e['service'] for e in self.entries)
+         return {
+             'total': len(self.entries),
+             'errors': len(self.errors),
+@@ -254,7 +256,7 @@
+         if not self.entries:
+             return []
+         window_delta = timedelta(seconds
