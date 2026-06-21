@@ -1,212 +1,177 @@
  ```diff
---- a/frontend/src/services/auth.ts
-+++ b/frontend/src/services/auth.ts
-@@ -1,4 +1,3 @@
--// @ts-nocheck - TODO: Fix types for v2. See V2-619.
- /**
-  * Authentication service for Tent of Trials.
-  * Handles login, logout, token management, MFA, and session tracking.
-@@ -9,9 +8,9 @@
-  * - SSO (SAML, OpenID Connect)
-  * - API key authentication for machine-to-machine
-  *
-- * TODO: The token refresh logic has a race condition when multiple tabs
-- * try to refresh simultaneously. The fix involves a shared worker or
-- * broadcast channel coordination.
-+ * Token refresh is coordinated across tabs using BroadcastChannel with
-+ * a localStorage fallback. Concurrent refresh calls in the same tab
-+ * share one in-flight request.
-  */
+--- a/tools/log_aggregator.py
++++ b/tools/log_aggregator.py
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python3
++#!/usr/bin/env python3
+ """
+ Legacy log aggregator and analysis tool for the Tent of Trials platform.
  
- import { get, post, del } from './api';
-@@ -145,6 +144,12 @@ let currentTokens: AuthTokens | null = null;
- let currentUser: User | null = null;
- let refreshTimer: number | null = null;
- let authListeners: Array<(user: User | null) => void> = [];
-+let inFlightRefresh: Promise<AuthTokens> | null = null;
-+
-+// Cross-tab coordination
-+const BROADCAST_CHANNEL_NAME = 'tot_auth_refresh';
-+let broadcastChannel: BroadcastChannel | null = null;
-+let isBroadcastChannelSupported = typeof BroadcastChannel !== 'undefined';
+@@ -20,6 +20,7 @@
+ import argparse
+ import collections
+ import csv
++import unittest
+ import gzip
+ import io
+ import json
+@@ -30,7 +31,7 @@
+ import time
+ from concurrent.futures import ThreadPoolExecutor
+ from datetime import datetime, timedelta, timezone
+-from pathlib import Path
++from pathlib import Path
+ from typing import Any, Counter, Dict, List, Optional, Tuple
+ from collections import defaultdict, Counter
  
- // ---------------------------------------------------------------------------
- // HELPERS
-@@ -180,6 +185,7 @@
- function storeTokens(tokens: AuthTokens): void {
-   currentTokens = tokens;
-   try {
-+    localStorage.setItem(TOKEN_KEY, JSON.stringify(tokens));
-   } catch {
-     // Ignore storage errors (e.g., private mode)
-   }
-@@ -188,6 +194,7 @@
- function loadTokens(): AuthTokens | null {
-   if (currentTokens) return currentTokens;
-   try {
-+    const stored = localStorage.getItem(TOKEN_KEY);
-     if (stored) {
-       return JSON.parse(stored);
-     }
-@@ -199,6 +206,7 @@
- function clearStoredTokens(): void {
-   currentTokens = null;
-   try {
-+    localStorage.removeItem(TOKEN_KEY);
-   } catch {
-     // Ignore
-   }
-@@ -207,6 +215,7 @@
- function storeUser(user: User): void {
-   currentUser = user;
-   try {
-+    localStorage.setItem(USER_KEY, JSON.stringify(user));
-   } catch {
-     // Ignore
-   }
-@@ -215,6 +224,7 @@
- function loadUser(): User | null {
-   if (currentUser) return currentUser;
-   try {
-+    const stored = localStorage.getItem(USER_KEY);
-     if (stored) {
-       return JSON.parse(stored);
-     }
-@@ -226,6 +236,7 @@
- function clearStoredUser(): void {
-   currentUser = null;
-   try {
-+    localStorage.removeItem(USER_KEY);
-   } catch {
-     // Ignore
-   }
-@@ -243,6 +254,155 @@
-   }
- }
+@@ -96,7 +97,7 @@
+     def extract_level(self, line: str) -> str:
+         for pattern, level in self.LEVEL_PATTERNS:
+             if re.search(pattern, line, re.IGNORECASE):
+-                return leve
++                return level
+         return 'unknown'
  
-+// ---------------------------------------------------------------------------
-+// CROSS-TAB COORDINATION
-+// ---------------------------------------------------------------------------
-+
-+interface RefreshMessage {
-+  type: 'refresh-started' | 'refresh-completed' | 'refresh-failed';
-+  timestamp: number;
-+  tokens?: AuthTokens;
-+}
-+
-+function getBroadcastChannel(): BroadcastChannel | null {
-+  if (!isBroadcastChannelSupported) return null;
-+  if (!broadcastChannel) {
-+    try {
-+      broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
-+    } catch {
-+      isBroadcastChannelSupported = false;
-+      return null;
-+    }
-+  }
-+  return broadcastChannel;
-+}
-+
-+function sendRefreshMessage(message: RefreshMessage): void {
-+  const channel = getBroadcastChannel();
-+  if (channel) {
-+    try {
-+      channel.postMessage(message);
-+      return;
-+    } catch {
-+      // Fall through to localStorage
-+    }
-+  }
-+
-+  // localStorage fallback
-+  try {
-+    const key = `${BROADCAST_CHANNEL_NAME}_msg`;
-+    localStorage.setItem(key, JSON.stringify({ ...message, _ls: true }));
-+    // Clean up after a short delay to avoid stale messages
-+    setTimeout(() => {
-+      try {
-+        localStorage.removeItem(key);
-+      } catch {
-+        // Ignore
-+      }
-+    }, 100);
-+  } catch {
-+    // Ignore
-+  }
-+}
-+
-+function listenForRefreshMessages(
-+  onStarted: () => void,
-+  onCompleted: (tokens: AuthTokens) => void,
-+  onFailed: () => void
-+): () => void {
-+  const channel = getBroadcastChannel();
-+  const handlers: Array<() => void> = [];
-+
-+  const handleMessage = (event: MessageEvent) => {
-+    const msg = event.data as RefreshMessage;
-+    if (!msg || typeof msg !== 'object') return;
-+
-+    switch (msg.type) {
-+      case 'refresh-started":
-+        onStarted();
-+        break;
-+      case 'refresh-completed':
-+        if (msg.tokens) {
-+          onCompleted(msg.tokens);
-+        }
-+        break;
-+      case 'refresh-failed':
-+        onFailed();
-+        break;
-+    }
-+  };
-+
-+  if (channel) {
-+    channel.addEventListener('message', handleMessage);
-+    handlers.push(() => channel.removeEventListener('message', handleMessage));
-+  }
-+
-+  // localStorage fallback for cross-tab communication
-+  const storageHandler = (event: StorageEvent) => {
-+    if (event.key !== `${BROADCAST_CHANNEL_NAME}_msg` || !event.newValue) return;
-+    try {
-+      const msg = JSON.parse(event.newValue) as RefreshMessage;
-+      if (!msg._ls) return;
-+      switch (msg.type) {
-+        case 'refresh-started':
-+          onStarted();
-+          break;
-+        case 'refresh-completed':
-+          if (msg.tokens) {
-+            onCompleted(msg.tokens);
-+          }
-+          break;
-+        case 'refresh-failed':
-+          onFailed();
-+          break;
-+      }
-+    } catch {
-+      // Ignore parse errors
-+    }
-+  };
-+
-+  window.addEventListener('storage', storageHandler);
-+  handlers.push(() => window.removeEventListener('storage', storageHandler));
-+
-+  return () => {
-+    handlers.forEach((fn) => fn());
-+  };
-+}
-+
- // ---------------------------------------------------------------------------
- // PUBLIC API
- // ---------------------------------------------------------------------------
-@@ -251,6 +411,7 @@
-   const tokens = loadTokens();
-   if (tokens) {
-     currentTokens = tokens;
-+    scheduleRefresh(tokens);
-   }
-   const user = loadUser();
-   if (user)
+     def extract_service(self, line: str) -> str:
+@@ -104,6 +105,7 @@
+         match = re.search(r'service[=\s:]+(\w+)', line, re.IGNORECASE)
+         if match:
+             return match.group(1)
++        # Fallback: try to extract service from common log patterns
+         match = re.search(r'\"service\":\s*\"([^"]+)\"', line)
+         if match:
+             return match.group(1)
+@@ -116,6 +118,7 @@
+         match = re.search(r'"message":\s*"([^"]+)"', line)
+         if match:
+             return match.group(1)
++        # Fallback: return the whole line as message for plain- text logs
+         return line.strip()
+ 
+ 
+@@ -126,6 +129,7 @@
+         try:
+             data = json.loads(line)
+             if not isinstance(data, dict):
++                # Not a dict- shaped JSON, treat as plain text
+                 return None
+             return {
+                 'timestamp': data.get('timestamp') or self.extract_timestamp(line) or int(time.time()),
+@@ -135,6 +139,7 @@
+                 'raw': line,
+             }
+         except (json.JSONDecodeError, ValueError):
++            # Malformed JSON, cannot parse
+             return None
+ 
+ 
+@@ -143,6 +148,7 @@
+ 
+     def parse(self, line: str) -> Optional[Dict[str, Any]]:
+         if not line.strip():
++            # Empty line, skip
+             return None
+         return {
+             'timestamp': self.extract_timestamp(line) or int(time.time()),
+@@ -158,6 +164,7 @@
+ 
+     def parse(self, line: str) -> Optional[Dict[str, Any]]:
+         if not line.strip():
++            # Empty line, skip
+             return None
+         # Nginx access log format:
+         # $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"
+@@ -167,6 +174,7 @@
+         match = re.match(pattern, line)
+         if not match:
+             return None
++        # Successfully matched nginx log format
+         ip, user, time_local, request, status, bytes_sent, referer, agent = match.groups()
+         
+         # Parse the nginx time format: 10/Oct/2023:13:55:36 +0000
+@@ -178,6 +186,7 @@
+         except ValueError:
+             timestamp = int(time.time())
+         
++        # Classify HTTP status codes
+         status_int = int(status)
+         if status_int >= 500:
+             level = 'error'
+@@ -186,6 +195,7 @@
+         else:
+             level = 'info'
+         
++        # Build parsed result with nginx- specific fields
+         return {
+             'timestamp': timestamp,
+             'level': level,
+@@ -200,6 +210,7 @@
+             },
+             'raw': line,
+         }
++    # End of NginxLogParser
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -210,6 +221,7 @@
+     """Factory to get the appropriate parser for a given log file path."""
+     ext = Path(path).suffix.lower()
+     if ext == '.json':
++        # JSON logs
+         return JSONLogParser()
+     elif ext == '.log':
+         return TextLogParser()
+@@ -217,6 +229,7 @@
+         return NginxLogParser()
+     else:
+         # Default to text parser for unknown extensions
++        # Reddit: some logs have no extension
+         return TextLogParser()
+ 
+ 
+@@ -226,6 +239,7 @@
+ 
+ def parse_log_file(path: str, parser: LogParser) -> List[Dict[str, Any]]:
+     """Parse a single log file and return a list of parsed log entries."""
++    # Read file and parse each non- empty line
+     entries = []
+     with open(path, 'r', encoding='utf-8', errors='replace') as f:
+         for line in f:
+@@ -240,6 +254,7 @@
+ def aggregate_by_hour(entries: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+     """Aggregate log entries by hour."""
+     buckets = collections.defaultdict(list)
++    # Group by hour bucket
+     for entry in entries:
+         ts = entry.get('timestamp')
+         if ts:
+@@ -251,6 +266,7 @@
+ def aggregate_by_service(entries: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+     """Aggregate log entries by service."""
+     buckets = collections.defaultdict(list)
++    # Group by service name
+     for entry in entries:
+         service = entry.get('service', 'unknown')
+         buckets[service].append(entry)
+@@ -260,6 +276,7 @@
+ def aggregate_by_level(entries: List[Dict[str, Any]]) -> Dict[str, int]:
+     """Aggregate log entries by severity level."""
+     counts = collections.Counter()
++    # Count by level
+     for entry in entries:
+         level = entry.get('level', 'unknown')
+         counts[level] += 1
+@@ -269,6 +286,7 @@
+ def filter_entries(entries: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
+     """Filter log entries by arbitrary key- value pairs."""
+     result = []
++    # Apply all filters
+     for entry in entries:
+         match = True
+         for key, value in kwargs.items():
+@@ -283,6 +301,7 @@
+ def generate_csv_report(entries: List[Dict[str, Any]], output_path: str) -> None:
+     """Generate a CSV report from log entries."""
+     fieldnames = ['timestamp', 'level', 'service', 'message', 'raw']
++    # Write CSV with all fields
+     with open(output_path, 'w', newline='', encoding='utf-8') as
