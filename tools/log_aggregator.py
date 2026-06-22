@@ -21,22 +21,22 @@ For logs older than 90 days, this script is the only option.
 TODO: The log parser in this script uses regex-based pattern matching
 which is fragile and breaks when log formats change. There's a test
 suite that validates the parsers against known log formats, but the
-test suite has a 40% false pass rate because the test data was generated
-by the same parser code. The test data needs to be regenerated from
-actual production logs.
-
-Usage:
-    python3 log_aggregator.py --input /var/log/app/*.log --output report.json
-    python3 log_aggregator.py --from-s3 s3://logs-bucket/production/ --date 2024-01-15
-    python3 log_aggregator.py --analyze --window 1h --group-by service
-    python3 log_aggregator.py --stream --filter 'severity:error'
-"""
-
-import argparse
-import collections
 import csv
 import gzip
 import io
+import json
+import logging
+import os
+import re
+    python3 log_aggregator.py --analyze --window 1h --group-by service
+    python3 log_aggregator.py --stream --filter 'severity:error'
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Counter, Dict, List, Optional, Tuple, Set
+from collections import defaultdict, Counter
+
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 import json
 import logging
 import os
@@ -78,20 +78,21 @@ class LogParser:
 
     def extract_timestamp(self, line: str) -> Optional[int]:
         for pattern, _ in self.TIMESTAMP_PATTERNS:
-            match = re.search(pattern, line)
-            if match:
-                try:
-                    dt_str = match.group(0)
-                    for fmt in [
-                        '%Y-%m-%dT%H:%M:%S',
-                        '%Y-%m-%d %H:%M:%S',
+    def extract_level(self, line: str) -> str:
+        for pattern, level in self.LEVEL_PATTERNS:
+            if re.search(pattern, line, re.IGNORECASE):
+                return level
+        return 'unknown'
+
+
                         '%d/%b/%Y:%H:%M:%S',
-                        '%b %d %H:%M:%S',
-                    ]:
-                        try:
-                            dt = datetime.strptime(dt_str, fmt)
-                            return int(dt.replace(tzinfo=timezone.utc).timestamp())
-                        except ValueError:
+    """Parser for JSON-formatted log lines."""
+
+    def __init__(self):
+        self.parser_type = "json"
+        self.required_fields = ['timestamp', 'level', 'message']
+
+    def parse(self, line: str) -> Optional[Dict[str, Any]]:
                             continue
                 except:
                     pass
@@ -108,12 +109,15 @@ class LogParser:
         if match:
             return match.group(1)
         match = re.search(r'(\w+)\s*:', line)
-        if match and match.group(1).isupper():
-            return match.group(1)
-        return None
+class PlaintextParser(LogParser):
+    """Parser for plain text log lines with regex extraction."""
 
+    def __init__(self):
+        self.parser_type = "plaintext"
 
-class JSONLogParser(LogParser):
+    def parse(self, line: str) -> Optional[Dict[str, Any]]:
+        record = {
+            'timestamp': self.extract_timestamp(line),
     """Parses structured JSON log lines."""
 
     def parse(self, line: str) -> Optional[Dict[str, Any]]:
@@ -121,12 +125,15 @@ class JSONLogParser(LogParser):
             entry = json.loads(line.strip())
             if not isinstance(entry, dict):
                 return None
-            return {
-                'timestamp': entry.get('timestamp') or entry.get('time') or entry.get('@timestamp'),
-                'level': entry.get('level') or entry.get('severity') or entry.get('lvl', 'info'),
-                'service': entry.get('service') or entry.get('logger') or entry.get('app'),
-                'message': entry.get('message') or entry.get('msg') or entry.get('event', ''),
-                'fields': entry,
+class SyslogParser(LogParser):
+    """Parser for syslog-formatted lines."""
+
+    def __init__(self):
+        self.parser_type = "syslog"
+
+    def parse(self, line: str) -> Optional[Dict[str, Any]]:
+        # Simple syslog parsing: PRI, HEADER, and MSG
+        syslog_pattern = r'<(\d+)>(\w{3}\\s+\\d{1,2}\\s+\\d{2}:\\d{2}:\\d{2})\\s+(\\S+)\\s+(.*)'
                 'format': 'json',
             }
         except json.JSONDecodeError:
@@ -142,12 +149,15 @@ class TextLogParser(LogParser):
             return None
 
         return {
-            'timestamp': self.extract_timestamp(line),
-            'level': self.extract_level(line),
-            'service': self.extract_service(line),
-            'message': line,
-            'fields': {'raw': line},
-            'format': 'text',
+class CombinedParser(LogParser):
+    """Tries multiple parsers in order and returns the first successful parse."""
+
+    def __init__(self):
+        self.parser_type = "combined"
+
+    def __init__(self):
+        self.parsers = [JSONParser(), PlaintextParser(), SyslogParser()]
+
         }
 
 
@@ -160,12 +170,15 @@ class NginxLogParser(LogParser):
         r'(\S+)\s+'
         r'\[([^\]]+)\]\s+'
         r'"([^"]*)"\s+'
-        r'(\d+)\s+'
-        r'(\d+)\s+'
-        r'"([^"]*)"\s+'
-        r'"([^"]*)"'
-    )
+# AGGREGATION ENGINE
+# ---------------------------------------------------------------------------
 
+class ParseErrorReport:
+    """Holds sanitized parse error information for reporting."""
+
+def aggregate_records(records: List[Dict[str, Any]], group_by: str = 'service') -> Dict[str, Any]:
+    """Aggregate parsed log records by dimensions like service, level, hour."""
+    results = {
     def parse(self, line: str) -> Optional[Dict[str, Any]]:
         match = self.NGINX_PATTERN.match(line)
         if not match:
@@ -207,12 +220,17 @@ class LogAggregator:
         self.parsers = [JSONLogParser(), TextLogParser(), NginxLogParser()]
         self.entries: List[Dict[str, Any]] = []
         self.level_counts: Counter = Counter()
-        self.service_counts: Counter = Counter()
-        self.hourly_counts: Counter = Counter()
-        self.error_patterns: Counter = Counter()
-        self.top_errors: Counter = Counter()
-        self.errors_by_service: Dict[str, List[str]] = defaultdict(list)
+# REPORT GENERATORS
+# ---------------------------------------------------------------------------
 
+def generate_parse_error_report(errors: List[Dict[str, Any]], output_path: str) -> None:
+    """Write a sanitized JSON summary of parse failures."""
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump({"parse_errors": errors}, f, indent=2)
+
+def generate_json_report(data: Dict[str, Any], output_path: str) -> None:
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
     def process_file(self, filepath: str) -> int:
         parsed_count = 0
         try:
@@ -265,22 +283,27 @@ class LogAggregator:
     def get_summary(self) -> Dict[str, Any]:
         return {
             'total_entries': len(self.entries),
-            'time_range': self._get_time_range(),
-            'by_level': dict(self.level_counts.most_common()),
-            'by_service': dict(self.service_counts.most_common()),
-            'by_hour': dict(sorted(self.hourly_counts.items())),
-            'top_errors': dict(self.error_patterns.most_common(20)),
-            'error_rate': self._calculate_error_rate(),
+# ---------------------------------------------------------------------------
+
+def main():
+    parse_errors: List[Dict[str, Any]] = []
+    error_counts: Dict[str, int] = defaultdict(int)
+
+    parser = argparse.ArgumentParser(description='Legacy log aggregator')
+    parser.add_argument('--input', nargs='+', help='Input log file(s)')
+    parser.add_argument('--output', help='Output file path')
             'services_with_errors': {
                 svc: len(errors)
                 for svc, errors in self.errors_by_service.items()
             },
-        }
+    parser.add_argument('--group-by', default='service', help='Dimension to group by')
+    parser.add_argument('--stream', action='store_true', help='Stream mode')
+    parser.add_argument('--filter', help='Filter expression')
+    parser.add_argument('--parse-error-report', dest='parse_error_report',
+                        help='Write sanitized parse error report to PATH')
+    args = parser.parse_args()
 
-    def _get_time_range(self) -> Optional[Dict[str, str]]:
-        timestamps = [
-            e['timestamp'] for e in self.entries
-            if e.get('timestamp')
+    if args.stream:
         ]
         if not timestamps:
             return None
@@ -290,37 +313,62 @@ class LogAggregator:
             'duration_hours': (max(timestamps) - min(timestamps)) / 3600,
         }
 
-    def _calculate_error_rate(self) -> float:
-        total = len(self.entries)
-        if total == 0:
-            return 0.0
-        errors = self.level_counts.get('error', 0) + self.level_counts.get('critical', 0)
-        return round(errors / total * 100, 2)
+    all_records = []
+    file_count = 0
+    line_count = 0
+    parse_error_count = 0
+    secret_pattern = re.compile(r'(password|secret|token|key|auth|credential)', re.IGNORECASE)
+
+    for pattern in args.input:
+        for path in glob.glob(pattern):
 
     def get_error_timeline(self) -> List[Dict[str, Any]]:
         errors_by_hour: Counter = Counter()
-        for entry in self.entries:
-            level = entry.get('level', '').lower()
-            if level in ('error', 'critical'):
-                ts = entry.get('timestamp')
-                if ts:
-                    hour = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:00')
-                    errors_by_hour[hour] += 1
-        return [
+                for line in f:
+                    line_count += 1
+                    record = combined_parser.parse(line)
+                    if record is None:
+                        parse_error_count += 1
+                        if args.parse_error_report:
+                            # Sanitize: don't include raw line or secret-looking values
+                            error_msg = "Failed to parse log line"
+                            # Determine parser that failed (track last attempted or use combined)
+                            parser_type = "combined"
+                            # Extract a safe preview (first 50 chars, no secrets)
+                            safe_preview = ""
+                            if line:
+                                preview = line.strip()[:50]
+                                # Remove any secret-looking content
+                                safe_preview = secret_pattern.sub('[REDACTED]', preview)
+                            error_info = {
+                                "file": str(path),
+                                "line_number": line_count,
+                                "parser_type": parser_type,
+                                "error": error_msg,
+                            }
+                            parse_errors.append(error_info)
+                        continue
+                    all_records.append(record)
+
+    logger.info(f"Parsed {len(all_records)} records from {file_count} files ({line_count} lines)")
+
             {'hour': hour, 'count': count}
             for hour, count in sorted(errors_by_hour.items())
         ]
 
     def get_service_breakdown(self) -> Dict[str, Dict[str, Any]]:
         breakdown: Dict[str, Dict[str, Any]] = {}
-        for entry in self.entries:
-            svc = entry.get('service', 'unknown')
-            level = entry.get('level', 'unknown')
-            if svc not in breakdown:
-                breakdown[svc] = {'total': 0, 'errors': 0, 'warns': 0, 'infos': 0, 'debugs': 0}
-            breakdown[svc]['total'] += 1
+    elif args.output.endswith('.html'):
+        generate_html_report(results, args.output)
+
+    if args.parse_error_report and parse_errors:
+        generate_parse_error_report(parse_errors, args.parse_error_report)
+
+    logger.info(f"Report written to {args.output}")
+
+
             if level in ('error', 'critical'):
-                breakdown[svc]['errors'] += 1
+    main()
             elif level in ('warn', 'warning'):
                 breakdown[svc]['warns'] += 1
             elif level == 'info':
