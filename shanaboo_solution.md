@@ -7,162 +7,163 @@
  """
  Legacy log aggregator and analysis tool for the Tent of Trials platform.
  
-@@ -30,6 +30,7 @@
+@@ -10,7 +10,7 @@
+ The ELK stack migration was completed in production in Q2 2023. However,
+ this script is still used by the security team for forensic analysis
+ because it can process logs from archived backups that are stored in
+-S3 Glacier. The ELK stack only indexes logs from the last 90 days.
++S3 Glacier. The ELK stack only indexes logs from the last 90 days.
+ For logs older than 90 days, this script is the only option.
+ 
+ TODO: The log parser in this script uses regex-based pattern matching
+@@ -22,6 +22,7 @@
+     python3 log_aggregator.py --input /var/log/app/*.log --output report.json
+     python3 log_aggregator.py --from-s3 s3://logs-bucket/production/ --date 2024-01-15
+     python3 log_aggregator.py --analyze --window 1h --group-by service
++    python3 log_aggregator.py --input /var/log/app/*.log --output report.json --parse-error-report errors.json
+ """
+ 
+ import argparse
+@@ -31,6 +32,7 @@
+ import io
+ import json
  import logging
++import hashlib
  import os
  import re
-+import secrets
  import sys
- import time
- from concurrent.futures import ThreadPoolExecutor
-@@ -40,6 +41,9 @@
+@@ -39,7 +41,7 @@
+ from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ from typing import Any, Counter, Dict, List, Optional, Tuple
+-from collections import defaultdict, Counter
++from collections import defaultdict
+ 
  logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
  logger = logging.getLogger("log_aggregator")
- 
-+# Secret-like patterns to redact from error messages
-+SECRET_PATTERNS = [r'[Aa][Pp][Ii][_-]?[Kk][Ee][Yy', r'[Tt][Oo][Kk][Ee][Nn', r'[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd', r'[Ss][Ee][Cc][Rr][Ee][Tt', r'[Kk][Ee][Yy']
-+
- # ---------------------------------------------------------------------------
- # LOG PARSERS
- # ---------------------------------------------------------------------------
-@@ -80,6 +84,7 @@ def extract_level(self, line: str) -> str:
+@@ -91,7 +93,7 @@
+     def extract_level(self, line: str) -> str:
          for pattern, level in self.LEVEL_PATTERNS:
              if re.search(pattern, line, re.IGNORECASE):
-                 return leve
-+        return "unknown"
+-                return leve
++                return level
+         return "unknown"
  
-     def extract_timestamp(self, line: str) -> Optional[int]:
-         for pattern, _ in self.TIMESTAMP_PATTERNS:
-@@ -102,6 +107,7 @@ def extract_timestamp(self, line: str) -> Optional[int]:
-                     pass
-         return None
  
-+
- class JSONLogParser(LogParser):
+@@ -99,6 +101,7 @@
      """Parser for JSON-formatted log lines."""
  
-@@ -109,7 +115,7 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
-         try:
-             record = json.loads(line)
+     def __init__(self):
++        self.parser_type = "json"
+         self._required_keys = {'timestamp', 'level', 'message'}
+ 
+     def parse(self, line: str) -> Optional[Dict[str, Any]]:
+@@ -108,7 +111,7 @@
              if not isinstance(record, dict):
--                return None
-+                raise ValueError("JSON line is not a dict")
-             # Normalize common field names
-             timestamp = record.get('timestamp') or record.get('ts') or record.get('time')
-             level = record.get('level') or record.get('severity') or 'unknown'
-@@ -130,8 +136,9 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
-                 'raw': line,
-             }
-         except json.JSONDecodeError:
--            return None
-+            raise
+                 return None
+             # Normalize keys to lowercase
+-            record = {k.lower(): v for k, v in record.items()}
++            record = {k.lower() if isinstance(k, str) else k: v for k, v in record.items()}
+             # Ensure required keys exist
+             for key in self._required_keys:
+                 if key not in record:
+@@ -124,6 +127,9 @@
+ class PlaintextParser(LogParser):
+     """Parser for plain text log lines with regex extraction."""
  
++    def __init__(self):
++        self.parser_type = "plaintext"
 +
- class PlainTextLogParser(LogParser):
-     """Parser for plain text log lines."""
- 
-@@ -155,6 +162,7 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
-             'raw': line,
-         }
- 
-+
+     def parse(self, line: str) -> Optional[Dict[str, Any]]:
+         # Try to extract timestamp and level from the line
+         timestamp = self.extract_timestamp(line)
+@@ -140,6 +146,9 @@
  class SyslogParser(LogParser):
      """Parser for syslog-formatted lines."""
  
-@@ -181,6 +189,7 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
-             'raw': line,
-         }
- 
++    def __init__(self):
++        self.parser_type = "syslog"
 +
- # ---------------------------------------------------------------------------
+     def parse(self, line: str) -> Optional[Dict[str, Any]]:
+         # Simple syslog parsing: PRI, HEADER, MSG
+         syslog_pattern = r'^<(\d+)>(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+(.+)$'
+@@ -156,6 +165,9 @@
+ class AutoParser(LogParser):
+     """Automatically detects log format and delegates to appropriate parser."""
+ 
++    def __init__(self):
++        self.parser_type = "auto"
++
+     def __init__(self):
+         self.json_parser = JSONParser()
+         self.syslog_parser = SyslogParser()
+@@ -178,6 +190,9 @@
  # AGGREGATOR
  # ---------------------------------------------------------------------------
-@@ -191,6 +200,7 @@ def __init__(self):
-         self.records: List[Dict[str, Any]] = []
-         self.errors: List[Dict[str, Any]] = []
-         self.stats = defaultdict(lambda: defaultdict(int))
-+        self.parse_errors: List[Dict[str, Any]] = []
  
-     def add_record(self, record: Dict[str, Any]) -> None:
-         self.records.append(record)
-@@ -202,6 +212,9 @@ def add_error(self, error: Dict[str, Any]) -> None:
-         self.errors.append(error)
-         self.stats['errors'][error.get('type', 'unknown')] += 1
- 
-+    def add_parse_error(self, error: Dict[str, Any]) -> None:
-+        self.parse_errors.append(error)
++ParseError = Dict[str, Any]
 +
-     def group_by(self, key: str) -> Dict[str, List[Dict[str, Any]]]:
-         groups = defaultdict(list)
-         for record in self.records:
-@@ -215,6 +228,7 @@ def summary(self) -> Dict[str, Any]:
-             'total_errors': len(self.errors),
-             'group_counts': {k: len(v) for k, v in self.group_by('service').items()},
-             'level_counts': dict(self.stats['levels']),
-+            'parse_error_count': len(self.parse_errors),
++
+ class LogAggregator:
+     """Aggregates logs from multiple sources and generates reports."""
+ 
+@@ -185,6 +200,7 @@
+         self.records: List[Dict[str, Any]] = []
+         self.errors: List[str] = []
+         self.stats: Dict[str, Any] = {
++            'parse_errors': []  # type: List[ParseError]
+             'total_lines': 0,
+             'parsed_lines': 0,
+             'error_lines': 0,
+@@ -193,6 +209,7 @@
+         self.parsers = {
+             'json': JSONParser(),
+             'plaintext': PlaintextParser(),
++            'syslog': SyslogParser(),
+             'auto': AutoParser(),
          }
  
- # ---------------------------------------------------------------------------
-@@ -223,7 +237,7 @@ def summary(self) -> Dict[str, Any]:
+@@ -203,6 +220,7 @@
+         parser = self.parsers.get(parser_name, self.parsers['auto'])
+         file_path = Path(file_path)
  
- def detect_parser(file_path: str) -> LogParser:
-     """Detect the appropriate parser based on file extension and content sampling."""
--    ext = os.path.splitext(file_path)[1].lower()
-+    ext = Path(file_path).suffix.lower()
- 
-     # Check for gzip
-     if ext == '.gz':
-@@ -249,7 +263,7 @@ def detect_parser(file_path: str) -> LogParser:
-             return PlainTextLogParser()
- 
-     # Default to plain text for unknown extensions
--    return PlainTextLogParser()
-+    return PlainTextLogParser()
- 
- 
- def read_log_file(file_path: str):
-@@ -268,7 +282,7 @@ def read_log_file(file_path: str):
-         yield from f
- 
- 
--def process_file(file_path: str, aggregator: LogAggregator) -> Dict[str, Any]:
-+def process_file(file_path: str, aggregator: LogAggregator, parse_error_report: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-     """Process a single log file and add records to the aggregator."""
-     parser = detect_parser(file_path)
-     stats = {
-@@ -280,14 +294,33 @@ def process_file(file_path: str, aggregator: LogAggregator) -> Dict[str, Any]:
- 
-     for line_num, line in enumerate(read_log_file(file_path), 1):
-         line = line.rstrip('\n\r')
--        record = parser.parse(line)
--        if record:
--            aggregator.add_record(record)
--            stats['parsed'] += 1
--        else:
-+        try:
-+            record = parser.parse(line)
-+            if record:
-+                aggregator.add_record(record)
-+                stats['parsed'] += 1
-+            else:
-+                stats['failed'] += 1
-+        except Exception as e:
-             stats['failed'] += 1
-+            error_info = {
-+                'file': file_path,
-+                'line_number': line_num,
-+                'parser_type': type(parser).__name__,
-+                'error': _sanitize_error(str(e)),
-+            }
-+            aggregator.add_parse_error(error_info)
-+            if parse_error_report is not None:
-+                parse_error_report.append(error_info)
- 
-     return stats
- 
- 
-+def _sanitize_error(error_msg: str) -> str:
-+    """Remove potentially sensitive information from error messages."""
-+    sanitized = error_msg
-+    for pattern in SECRET_PATTERNS:
-+        sanitized
++        parse_errors = []  # type: List[ParseError]
+         try:
+             if file_path.suffix == '.gz':
+                 f = gzip.open(file_path, 'rt', encoding='utf-8', errors='replace')
+@@ -213,14 +231,30 @@
+             with f:
+                 for line_num, line in enumerate(f, 1):
+                     self.stats['total_lines'] += 1
++                    line = line.rstrip('\n\r')
++                    if not line:
++                        continue
+                     try:
+                         record = parser.parse(line)
+                         if record:
+                             self.records.append(record)
+                             self.stats['parsed_lines'] += 1
+                         else:
+                             self.stats['error_lines'] += 1
++                            # Record parse error
++                            error_info = {
++                                'parser_type': getattr(parser, 'parser_type', 'unknown'),
++                                'file_path': str(file_path),
++                                'line_number': line_num,
++                                'error_message': 'Failed to parse log line',
++                            }
++                            parse_errors.append(error_info)
+                     except Exception as e:
+                         self.stats['error_lines'] += 1
+                         self.errors.append(f"{file_path}:{line_num}: {e}")
++                        # Record parse error with sanitized message
++                        error_info = {
++                            'parser_type': getattr(parser, 'parser_type', 'unknown'),
++                            'file_path': str(file_path),
++                            'line_number': line_num,
++                            'error_message': _sanitize_error_message(str(e)),
++                        }
++                        parse_errors.append(error_info)
++
++        self.stats['parse_errors'].extend(parse_errors)
+         return
