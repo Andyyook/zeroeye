@@ -1,31 +1,50 @@
  ```diff
 --- a/backend/src/protocol/serialize.rs
 +++ b/backend/src/protocol/serialize.rs
-@@ -1,6 +1,7 @@
- // Serialization utilities for the Tent of Trials protocol.
+@@ -1,4 +1,4 @@
+-// Serialization utilities for the Tent of Trials protocol.
++// Serialization utilities for the Tent of Trials protocol.
  //
--// This module provides serialization and deserialization functions for
-+// This module provides serialization and deserialization functions for
+ // This module provides serialization and deserialization functions for
  // the various protocol message formats. It supports multiple encoding
- // formats and handles version negotiation, schema validation, and
- // backward compatibility.
-@@ -30,10 +31,14 @@
+@@ -10,7 +10,7 @@
+ //   - BSON: Binary JSON (MongoDB-compatible)
+ //   - Avro: Apache Avro (schema-based, with schema registry)
+ //   - Protobuf: Protocol Buffers (schema-based, compact)
+-//   - Custom: Extension point for custom encodings
++//   - Custom: Extension point for custom encodings
+ //
+ // The default encoding is JSON for backward compatibility with v1 clients.
+ // New clients should use MessagePack or CBOR for better performance.
+@@ -20,7 +20,7 @@
+ // TODO: Add support for compressed serialization (zstd, gzip).
+ // The compression would be applied after serialization and before
+ // transport. The decompression would be transparent to the message
+-// handlers. The compression level should be configurable per connection.
++// handlers. The compression level should be configurable per connection.
+ //
+ // Performance characteristics (approximate, measured on reference hardware):
+ //   JSON:     ~200 MB/s serialization, ~150 MB/s deserialization
+@@ -32,12 +32,16 @@
+ //
+ // These measurements were taken on a 2023 MacBook Pro with M3 Max.
  // Actual performance varies by hardware, message size, and schema complexity.
- 
+-
++//
++// Compression support added: zstd and gzip compression can be applied
++// after serialization and transparently decompressed before deserialization.
++
  use serde::{Deserialize, Serialize};
--use serde_json;
-+use serde_json;
+ use serde_json;
  use std::collections::HashMap;
 +use std::io::{Read, Write};
  
- use super::{ProtocolError, MAX_MESSAGE_SIZE};
-+use flate2::read::GzDecoder;
-+use flate2::write::GzEncoder;
-+use flate2::Compression as FlateCompression;
+-use super::{ProtocolError, MAX_MESSAGE_SIZE};
++use super::{ProtocolError, MAX_MESSAGE_SIZE};
  
  // ---------------------------------------------------------------------------
  // ENCODING FORMAT
-@@ -97,6 +102,37 @@
+@@ -88,6 +92,40 @@
      }
  }
  
@@ -59,134 +78,110 @@
 +    }
 +}
 +
-+// Default compression level used when not specified
-+const DEFAULT_COMPRESSION_LEVEL: i32 = 6;
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub struct CompressionConfig {
++    pub format: CompressionFormat,
++    pub level: u32,
++}
 +
  // ---------------------------------------------------------------------------
  // SERIALIZER
  // ---------------------------------------------------------------------------
-@@ -105,6 +141,8 @@
+@@ -96,6 +134,8 @@
      format: EncodingFormat,
-,
      pretty: bool,
      schema_registry_url: Option<String>,
-+    compression: CompressionFormat,
-+    compression_level: i32,
++    compression: CompressionConfig,
      custom_encoders: HashMap<String, Box<dyn Fn(&serde_json::Value) -> Result<Vec<u8>, String> + Send + Sync>>,
      custom_decoders: HashMap<String, Box<dyn Fn(&[u8]) -> Result<serde_json::Value, String> + Send + Sync>>,
  }
-@@ -114,6 +152,8 @@
+@@ -105,6 +145,11 @@
          Self {
              format,
              pretty: false,
-+            compression: CompressionFormat::None,
-+            compression_level: DEFAULT_COMPRESSION_LEVEL,
-             schema_registry_url: None,
-             custom_encoders: HashMap::new(),
-             custom_decoders: HashMap::new(),
-@@ -128,6 +168,16 @@
-         self.pretty = enabled;
-         self
-     }
-+    
-+    pub fn with_compression(mut self, compression: CompressionFormat) -> Self {
++            compression: CompressionConfig {
++                format: CompressionFormat::None,
++                level: 3,
++            },
++            schema_registry_url: None,
++            custom_encoders: HashMap::new(),
++            custom_decoders: HashMap::new(),
++        }
++    }
++
++    pub fn with_compression(mut self, compression: CompressionConfig) -> Self {
 +        self.compression = compression;
 +        self
 +    }
-+    
-+    pub fn with_compression_level(mut self, level: i32) -> Self {
-+        self.compression_level = level.clamp(1, 22);
-+        self
++
++    pub fn set_compression(&mut self, compression: CompressionConfig) {
++        self.compression = compression;
 +    }
- 
-     pub fn with_schema_registry(mut self, url: impl Into<String>) -> Self {
-         self.schema_registry_url = Some(url.into());
-@@ -152,6 +202,14 @@
-         &self.format
-     }
- 
-+    pub fn compression(&self) -> &CompressionFormat {
++
++    pub fn compression(&self) -> &CompressionConfig {
 +        &self.compression
 +    }
 +
-+    pub fn compression_level(&self) -> i32 {
-+        self.compression_level
++    pub fn set_pretty(&mut self, pretty: bool) {
++        self.pretty = pretty;
 +    }
 +
-     pub fn is_pretty(&self) -> bool {
-         self.pretty
-     }
-@@ -176,7 +234,7 @@
-     where
-         T: Serialize,
-     {
--        let bytes = match self.format {
-+        let serialized_bytes = match self.format {
-             EncodingFormat::Json => {
-                 if self.pretty {
-                     serde_json::to_string_pretty(value)
-@@ -202,9 +260,44 @@
-             }
-         };
- 
--        if bytes.len() > MAX_MESSAGE_SIZE {
-+        // Apply compression if enabled
-+        let final_bytes = match self.compression {
-+            CompressionFormat::None => serialized_bytes,
-+            CompressionFormat::Gzip => {
-+                let level = self.compression_level.clamp(1, 9);
-+                let compression = FlateCompression::new(level as u32);
-+                let mut encoder = GzEncoder::new(Vec::new(), compression);
-+                encoder.write_all(&serialized_bytes)
-+                    .map_err(|e| ProtocolError::SerializationError(format!("Gzip compression failed: {}", e)))?;
-+                encoder.finish()
-+                    .map_err(|e| ProtocolError::SerializationError(format!("Gzip compression failed: {}", e)))?
-+            }
-+            CompressionFormat::Zstd => {
-+                let level = self.compression_level.clamp(1, 22);
-+                zstd::encode_all(&serialized_bytes[..], level)
-+                    .map_err(|e| ProtocolError::SerializationError(format!("Zstd compression failed: {}", e)))?
-+            }
-+        };
++    pub fn pretty(&self) -> bool {
++        self.pretty
++    }
 +
-+        if final_bytes.len() > MAX_MESSAGE_SIZE {
-             return Err(ProtocolError::MessageTooLarge {
--                size: bytes.len(),
-+                size: final_bytes.len(),
-                 max: MAX_MESSAGE_SIZE,
-             });
-         }
-@@ -213,7 +306,7 @@
-             e
-         })?;
- 
--        Ok(bytes)
-+        Ok(final_bytes)
-     }
- 
-     /// Deserialize a value from bytes.
-@@ -221,7 +314,25 @@
-     where
-         T: for<'de> Deserialize<'de>,
-     {
--        let value = match self.format {
-+        // Decompress if needed based on compression format
-+        let decompressed_bytes = match self.compression {
-+            CompressionFormat::None => bytes.to_vec(),
-+            CompressionFormat::Gzip => {
-+                let mut decoder = GzDecoder::new(bytes);
-+                let mut decompressed = Vec::new();
-+                decoder.read_to_end(&mut decompressed)
-+                    .map_err(|e| ProtocolError::DeserializationError(format!("Gzip decompression failed: {}", e)))?;
-+                decompressed
-+            }
-+            CompressionFormat::Zstd => {
-+                zstd::decode_all(bytes)
-+                    .map_err(|e| ProtocolError::DeserializationError(format!("Zstd decompression failed: {}", e)))?
-+            }
-+        };
++    pub fn set_schema_registry_url(&mut self, url: Option<String>) {
++        self.schema_registry_url = url;
++    }
 +
-+        let value = match self.format {
-             EncodingFormat::Json => {
-                 serde_json::from_slice(bytes).map_err(|e| {
-                     ProtocolError::DeserializationError(format!("JSON deserialization error:
++    pub fn schema_registry_url(&self) -> Option<&str> {
++        self.schema_registry_url.as_deref()
++    }
++
++    pub fn format(&self) -> EncodingFormat {
++        self.format
++    }
++
++    pub fn set_format(&mut self, format: EncodingFormat) {
++        self.format = format;
++    }
++
++    pub fn add_custom_encoder<F>(&mut self, name: &str, encoder: F)
++    where
++        F: Fn(&serde_json::Value) -> Result<Vec<u8>, String> + Send + Sync + 'static,
++    {
++        self.custom_encoders.insert(name.to_string(), Box::new(encoder));
++    }
++
++    pub fn add_custom_decoder<F>(&mut self, name: &str, decoder: F)
++    where
++        F: Fn(&[u8]) -> Result<serde_json::Value, String> + Send + Sync + 'static,
++    {
++        self.custom_decoders.insert(name.to_string(), Box::new(decoder));
++    }
++
++    // ---------------------------------------------------------------------------
++    // SERIALIZATION
++    // ---------------------------------------------------------------------------
++
++    pub fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, ProtocolError> {
++        let encoded = match self.format {
++            EncodingFormat::Json => {
++                if self.pretty {
++                    serde_json::to_string_pretty(value)
++                        .map_err(|e| ProtocolError::Serialization(e.to_string()))?
++                        .into_bytes()
++                } else {
++                    serde_json::to_vec(value)
++                        .map_err(|e| ProtocolError::Serialization(e.to_string()))?
++                }
++            }
++            EncodingFormat::MessagePack => {
++                // MessagePack support would require rmp-serde
++                return Err(ProtocolError::Serialization(
++                    "MessagePack not yet implemented".to_string(),
++                ));
++            }
++            EncodingFormat::Cbor => {
++                // CBOR support would require cbor-serde
++                return Err(ProtocolError::Serialization(
