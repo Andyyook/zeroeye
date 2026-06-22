@@ -1,145 +1,181 @@
  ```diff
---- a/tools/log_aggregator.py
-+++ b/tools/log_aggregator.py
-@@ -1,4 +1,4 @@
--#!/usr/bin/env python3
-+#!/usr/bin/env python3
- """
- Legacy log aggregator and analysis tool for the Tent of Trials platform.
+--- a/backend/src/protocol/serialize.rs
++++ b/backend/src/protocol/serialize.rs
+@@ -1,3 +1,4 @@
++use flate2::read::GzDecoder;
+ // Serialization utilities for the Tent of Trials protocol.
+ //
+ // This module provides serialization and deserialization functions for
+@@ -32,10 +33,12 @@
+ // These measurements were taken on a 2023 MacBook Pro with M3 Max.
+ // Actual performance varies by hardware, message size, and schema complexity.
  
-@@ -15,6 +15,7 @@
- because it can process logs from archived backups that are stored in
- S3 Glacier. The ELK stack only indexes logs from the last 90 days.
- For logs older than 90 days, this script is the only option.
-+This script now supports parse-error reporting for malformed logs.
++use flate2::write::GzEncoder;
++use flate2::Compression as GzCompressionLevel;
+ use serde::{Deserialize, Serialize};
+ use serde_json;
+ use std::collections::HashMap;
+-
++use std::io::Write;
+ use super::{ProtocolError, MAX_MESSAGE_SIZE};
  
- TODO: The log parser in this script uses regex-based pattern matching
- which is fragile and breaks when log formats change. There's a test
-@@ -26,6 +27,7 @@
-     python3 log_aggregator.py --input /var/log/app/*.log --output report.json
-     python3 log_aggregator.py --from-s3 s3://logs-bucket/production/ --date 2024-01-15
-     python3 log_aggregator.py --analyze --window 1h --group-by service
-+    python3 log_aggregator.py --input /var/log/app/*.log --parse-error-report errors.json
-     python3 log_aggregator.py --stream --filter 'severity:error'
- """
+ // ---------------------------------------------------------------------------
+@@ -96,6 +99,34 @@
+     }
+ }
  
-@@ -40,6 +42,7 @@
- import sys
- import time
- from concurrent.futures import ThreadPoolExecutor
-+from dataclasses import dataclass, field
- from datetime import datetime, timedelta, timezone
- from pathlib import Path
- from typing import Any, Counter, Dict, List, Optional, Tuple
-@@ -48,6 +51,32 @@
- logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
- logger = logging.getLogger("log_aggregator")
- 
++// ---------------------------------------------------------------------------
++// COMPRESSION FORMAT
++// ---------------------------------------------------------------------------
 +
-+# ---------------------------------------------------------------------------
-+# PARSE ERROR REPORTING
-+# ---------------------------------------------------------------------------
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum CompressionFormat {
++    None = 0,
++    Gzip = 1,
++    Zstd = 2,
++}
 +
-+@dataclass
-+class ParseErrorReport:
-+    """Collects sanitized parse errors for reporting without leaking sensitive data."""
-+    errors: List[Dict[str, Any]] = field(default_factory=list)
++impl CompressionFormat {
++    pub fn from_u32(value: u32) -> Option<Self> {
++        match value {
++            0 => Some(CompressionFormat::None),
++            1 => Some(CompressionFormat::Gzip),
++            2 => Some(CompressionFormat::Zstd),
++            _ => None,
++        }
++    }
++}
 +
-+    def add_error(self, parser_type: str, file_path: str, line_number: int, error_message: str) -> None:
-+        """Add a sanitized parse error to the report."""
-+        sanitized_message = self._sanitize_error_message(error_message)
-+        self.errors.append({
-+            "parser_type": parser_type,
-+            "file_path": file_path,
-+            "line_number": line_number,
-+            "error_message": sanitized_message,
-+        })
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub struct CompressionConfig {
++    pub format: CompressionFormat,
++    pub level: u32,
++}
 +
-+    def _sanitize_error_message(self, message: str) -> str:
-+        """Remove potential secrets and raw log content from error messages."""
-+        # Remove anything that looks like a secret (key=, token=, password=, secret=)
-+        sanitized = re.sub(r'(?i)(key|token|password|secret|auth|credential)[\s]*[=:][\s]*[^\s]+', r'\1=<REDACTED>', message)
-+        # Truncate very long messages
-+        if len(sanitized) > 500:
-+            sanitized = sanitized[:500] + "...[truncated]"
-+        return sanitized
++// ---------------------------------------------------------------------------
++// SERIALIZER
++// ---------------------------------------------------------------------------
 +
- # ---------------------------------------------------------------------------
- # LOG PARSERS
- # ---------------------------------------------------------------------------
-@@ -72,7 +101,7 @@
-         (r'\b(DEBUG|TRACE)\b', 'debug'),
-     ]
+ pub struct Serializer {
+     format: EncodingFormat,
+     pretty: bool,
+@@ -103,6 +134,8 @@
+     custom_encoders: HashMap<String, Box<dyn Fn(&serde_json::Value) -> Result<Vec<u8>, String> + Send + Sync>>,
+     custom_decoders: HashMap<String, Box<dyn Fn(&[u8]) -> Result<serde_json::Value, String> + Send + Sync>>,
++    compression: CompressionConfig,
++    max_message_size: usize,
+ }
  
--    def parse(self, line: str) -> Optional[Dict[str, Any]]:
-+    def parse(self, line: str, file_path: str = "", line_number: int = 0, error_report: Optional[ParseErrorReport] = None) -> Optional[Dict[str, Any]]:
-         raise NotImplementedError
- 
-     def extract_timestamp(self, line: str) -> Optional[int]:
-@@ -108,6 +137,9 @@ def extract_level(self, line: str) -> str:
-         return 'unknown'
- 
- 
-+_global_parse_error_report: Optional[ParseErrorReport] = None
-+
-+
- class JSONLogParser(LogParser):
-     """Parser for JSON-formatted log lines."""
- 
-@@ -117,13 +149,22 @@ def __init__(self):
-         self.malformed_count = 0
-         self.total_count = 0
- 
--    def parse(self, line: str) -> Optional[Dict[str, Any]]:
-+    def parse(self, line: str, file_path: str = "", line_number: int = 0, error_report: Optional[ParseErrorReport] = None) -> Optional[Dict[str, Any]]:
-         self.total_count += 1
-         try:
-             record = json.loads(line)
-             self.parsed_count += 1
-             return record
--        except json.JSONDecodeError:
-+        except json.JSONDecodeError as e:
-+            self.malformed_count += 1
-+            if error_report is not None:
-+                error_report.add_error(
-+                    parser_type="json",
-+                    file_path=file_path,
-+                    line_number=line_number,
-+                    error_message=f"JSON decode error: {str(e)}",
-+                )
-+            return None
-+        except Exception as e:
-             self.malformed_count += 1
-             return None
- 
-@@ -131,7 +172,7 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
- class PlainTextLogParser(LogParser):
-     """Parser for plain text log lines."""
- 
--    def parse(self, line: str) -> Optional[Dict[str, Any]]:
-+    def parse(self, line: str, file_path: str = "", line_number: int = 0, error_report: Optional[ParseErrorReport] = None) -> Optional[Dict[str, Any]]:
-         # Try to extract timestamp and level from plain text
-         timestamp = self.extract_timestamp(line)
-         level = self.extract_level(line)
-@@ -141,6 +182,15 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
-             'timestamp': timestamp,
-             'level': level,
+ impl Serializer {
+@@ -114,6 +147,8 @@
+             schema_registry_url: None,
+             custom_encoders: HashMap::new(),
+             custom_decoders: HashMap::new(),
++            compression: CompressionConfig { format: CompressionFormat::None, level: 0 },
++            max_message_size: MAX_MESSAGE_SIZE,
          }
-+        # If the line is empty or doesn't look like a log, record as potential parse issue
-+        if not line.strip():
-+            if error_report is not None:
-+                error_report.add_error(
-+                    parser_type="plaintext",
-+                    file_path=file_path,
-+                    line_number=line_number,
-+                    error_message="Empty line in plaintext log",
-+                )
-         return result
+     }
  
+@@ -121,6 +156,16 @@
+         self.pretty = pretty;
+         self
+    unto the JSON/MessagePack deserializer.
++    pub fn with_compression(mut self, compression: CompressionConfig) -> Self {
++        self.compression = compression;
++        self
++    }
++
++    pub fn with_max_message_size(mut self, max_message_size: usize) -> Self {
++        self.max_message_size = max_message_size;
++        self
++    }
++
++    pub fn compression(&self) -> CompressionConfig {
++        self.compression
++    }
  
-@@ -148,7 +198,7 @@ class SyslogParser(LogParser):
-     """Parser for syslog-formatted lines."""
+     pub fn with_schema_registry(mut self, url: String) -> Self {
+         self.schema_registry_url = Some(url);
+@@ -155,6 +200,56 @@
+         self.custom_decoders.insert(name.to_string(), Box::new(decoder));
+         self
+     }
++    
++    /// Compress bytes according to the configured compression format.
++    fn compress(&self, data: &[u8]) -> Result<Vec<u8>, ProtocolError> {
++        match self.compression.format {
++            CompressionFormat::None => Ok(data.to_vec()),
++            CompressionFormat::Gzip => {
++                let level = match self.compression.level {
++                    0 => GzCompressionLevel::default(),
++                    1..=9 => GzCompressionLevel::new(self.compression.level.min(9)),
++                    _ => GzCompressionLevel::default(),
++                };
++                let mut encoder = GzEncoder::new(Vec::new(), level);
++                encoder.write_all(data).map_err(|e| ProtocolError::SerializationError(format!("gzip compression failed: {}", e)))?;
++                encoder.finish().map_err(|e| ProtocolError::SerializationError(format!("gzip compression failed: {}", e)))
++            }
++            CompressionFormat::Zstd => {
++                let level = if self.compression.level == 0 {
++                    3
++                } else {
++                    self.compression.level.clamp(1, 22)
++                } as i32;
++                zstd::encode_all(data, level).map_err(|e| ProtocolError::SerializationError(format!("zstd compression failed: {}", e)))
++            }
++        }
++    }
++    
++    /// Decompress bytes according to the configured compression format.
++    fn decompress(&self, data: &[u8]) -> Result<Vec<u8>, ProtocolError> {
++        match self.compression.format {
++            CompressionFormat::None => Ok(data.to_vec()),
++            CompressionFormat::Gzip => {
++                let mut decoder = GzDecoder::new(data);
++                let mut decompressed = Vec::new();
++                std::io::Read::read_to_end(&mut decoder, &mut decompressed)
++                    .map_err(|e| ProtocolError::SerializationError(format!("gzip decompression failed: {}", e)))?;
++                Ok(decompressed)
++            }
++            CompressionFormat::Zstd => {
++                zstd::decode_all(data).map_err(|e| ProtocolError::SerializationError(format!("zstd decompression failed: {}", e)))
++            }
++        }
++    }
++    
++    /// Validate that the compressed data fits within the maximum message size.
++    fn validate_size(&self, data: &[u8]) -> Result<(), ProtocolError> {
++        if data.len() > self.max_message_size {
++            return Err(ProtocolError::SerializationError(format!(
++                "compressed message size {} exceeds MAX_MESSAGE_SIZE {}",
++                data.len(),
++                self.max_message_size
++            )));
++        }
++        Ok(())
++    }
  
-     # Simple syslog regex: <priority>timestamp host process[pid]: message
--    SYSLOG_RE = re.compile(r'^<(\d+)>(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+(.+)$')
-+    SYSLOG_RE = re.compile(r'^<(\d+)>(\w{3}\s+\d{1,2}\s+\d{
+     // -----------------------------------------------------------------------
+     // Serialization
+@@ -167,7 +262,14 @@
+     where
+         T: Serialize,
+     {
+-        match self.format {
++        let serialized = self.serialize_inner(value)?;
++        let compressed = self.compress(&serialized)?;
++        self.validate_size(&compressed)?;
++        Ok(compressed)
++    }
++
++    /// Serialize without compression (used internally).
++    fn serialize_inner<T>(&self, value: &T) -> Result<Vec<u8>, ProtocolError>
++    where
++        T: Serialize,
++    {
++        match self.format {
+             EncodingFormat::Json => {
+                 if self.pretty {
+                     serde_json::to_string_pretty(value)
+@@ -210,7 +312,14 @@
+     where
