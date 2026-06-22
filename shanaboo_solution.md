@@ -1,191 +1,168 @@
  ```diff
---- a/backend/src/protocol/serialize.rs
-+++ b/backend/src/protocol/serialize.rs
+--- a/tools/log_aggregator.py
++++ b/tools/log_aggregator.py
 @@ -1,4 +1,4 @@
--// Serialization utilities for the Tent of Trials protocol.
-+// Serialization utilities for the Tent of Trials protocol.
- //
- // This module provides serialization and deserialization functions for
- // the various protocol message formats. It supports multiple encoding
-@@ -59,10 +59,11 @@
- // TODO: Add support for compressed serialization (zstd, gzip).
- // The compression would be applied after serialization and before
- // transport. The decompression would be transparent to the message
--// handlers. The compression level should be configurable per connection.
-+// handlers. The compression level should be configurable per connection.
+-#!/usr/bin/env python3
++#!/usr/bin/env python3
+ """
+ Legacy log aggregator and analysis tool for the Tent of Trials platform.
  
- use serde::{Deserialize, Serialize};
- use serde_json;
-+use std::io::{Read, Write};
- use std::collections::HashMap;
+@@ -30,6 +30,7 @@
+ import logging
+ import os
+ import re
++import secrets
+ import sys
+ import time
+ from concurrent.futures import ThreadPoolExecutor
+@@ -40,6 +41,9 @@
+ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+ logger = logging.getLogger("log_aggregator")
  
- use super::{ProtocolError, MAX_MESSAGE_SIZE};
-@@ -70,6 +71,40 @@
- // ---------------------------------------------------------------------------
- // ENCODING FORMAT
- // ---------------------------------------------------------------------------
-+// ---------------------------------------------------------------------------
-+// COMPRESSION FORMAT
-+// ---------------------------------------------------------------------------
++# Secret-like patterns to redact from error messages
++SECRET_PATTERNS = [r'[Aa][Pp][Ii][_-]?[Kk][Ee][Yy', r'[Tt][Oo][Kk][Ee][Nn', r'[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd', r'[Ss][Ee][Cc][Rr][Ee][Tt', r'[Kk][Ee][Yy']
 +
-+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-+pub enum CompressionFormat {
-+    None = 0,
-+    Gzip = 1,
-+    Zstd = 2,
-+}
-+
-+impl CompressionFormat {
-+    pub fn from_u32(value: u32) -> Option<Self> {
-+        match value {
-+            0 => Some(CompressionFormat::None),
-+            1 => Some(CompressionFormat::Gzip),
-+            2 => Some(CompressionFormat::Zstd),
-+            _ => None,
-+        }
-+    }
-+
-+    pub fn name(&self) -> &str {
-+        match self {
-+            CompressionFormat::None => "None",
-+            CompressionFormat::Gzip => "Gzip",
-+            CompressionFormat::Zstd => "Zstd",
-+        }
-+    }
-+}
-+
-+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-+pub struct CompressionConfig {
-+    pub format: CompressionFormat,
-+    pub level: u32,
-+}
-+
-+impl Default for CompressionConfig {
-+    fn default() -> Self {
-+        Self {
-+            format: CompressionFormat::None,
-+            level: 3,
-+        }
-+    }
-+}
+ # ---------------------------------------------------------------------------
+ # LOG PARSERS
+ # ---------------------------------------------------------------------------
+@@ -80,6 +84,7 @@ def extract_level(self, line: str) -> str:
+         for pattern, level in self.LEVEL_PATTERNS:
+             if re.search(pattern, line, re.IGNORECASE):
+                 return leve
++        return "unknown"
  
- #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
- pub enum EncodingFormat {
-@@ -123,6 +158,7 @@
+     def extract_timestamp(self, line: str) -> Optional[int]:
+         for pattern, _ in self.TIMESTAMP_PATTERNS:
+@@ -102,6 +107,7 @@ def extract_timestamp(self, line: str) -> Optional[int]:
+                     pass
+         return None
  
- pub struct Serializer {
-     format: EncodingFormat,
-+    compression: CompressionConfig,
-     pretty: bool,
-     schema_registry_url: Option<String>,
-     custom_encoders: HashMap<String, Box<dyn Fn(&serde_json::Value) -> Result<Vec<u8>, String> + Send + Sync>>,
-@@ -133,6 +169,7 @@
-     pub fn new(format: EncodingFormat) -> Self {
-         Self {
-             format,
-+            compression: CompressionConfig::default(),
-             pretty: false,
-             schema_registry_url: None,
-             custom_encoders: HashMap::new(),
-@@ -140,6 +177,14 @@
-         }
-     }
++
+ class JSONLogParser(LogParser):
+     """Parser for JSON-formatted log lines."""
  
-+    pub fn with_compression(mut self, compression: CompressionConfig) -> Self {
-+        self.compression = compression;
-+        self
-+    }
-+
-+    pub fn compression(&self) -> &CompressionConfig {
-+        &self.compression
-+    }
-+
-     pub fn with_pretty(mut self, pretty: bool) -> Self {
-         self.pretty = pretty;
-         self
-@@ -175,7 +220,7 @@
-     where
-         T: Serialize,
-     {
--        // Serialize to the target format first
-+        // Serialize to the target format first
-         let encoded = match self.format {
-             EncodingFormat::Json => {
-                 if self.pretty {
-@@ -196,7 +241,7 @@
-             EncodingFormat::Protobuf => {
-                 return Err(ProtocolError::UnsupportedEncoding("Protobuf".to_string()));
+@@ -109,7 +115,7 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
+         try:
+             record = json.loads(line)
+             if not isinstance(record, dict):
+-                return None
++                raise ValueError("JSON line is not a dict")
+             # Normalize common field names
+             timestamp = record.get('timestamp') or record.get('ts') or record.get('time')
+             level = record.get('level') or record.get('severity') or 'unknown'
+@@ -130,8 +136,9 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
+                 'raw': line,
              }
--            EncodingFormat::Custom => {
-+            EncodingFormat::Custom => {
-                 // For custom formats, we need to first serialize to JSON as an intermediate step
-                 let json_value = serde_json::to_value(value)
-                     .map_err(|e| ProtocolError::Serialization(e.to_string()))?;
-@@ -209,7 +254,7 @@
-                         .ok_or_else(|| ProtocolError::UnsupportedEncoding("Custom".to_string()))?;
-                     encoder(&json_value).map_err(|e| ProtocolError::Serialization(e))?
-                 }
--            }
-+            }
-         };
+         except json.JSONDecodeError:
+-            return None
++            raise
  
-         if encoded.len() > MAX_MESSAGE_SIZE {
-@@ -218,7 +263,33 @@
-                 MAX_MESSAGE_SIZE,
-             ));
++
+ class PlainTextLogParser(LogParser):
+     """Parser for plain text log lines."""
+ 
+@@ -155,6 +162,7 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
+             'raw': line,
          }
--        Ok(encoded)
-+
-+        // Apply compression if enabled
-+        let compressed = match self.compression.format {
-+            CompressionFormat::None => encoded,
-+            CompressionFormat::Gzip => {
-+                let level = self.compression.level.min(9) as u32;
-+                let mut encoder = flate2::write::GzEncoder::new(
-+                    Vec::new(),
-+                    flate2::Compression::new(level),
-+                );
-+                encoder.write_all(&encoded).map_err(|e| ProtocolError::Serialization(e.to_string()))?;
-+                encoder.finish().map_err(|e| ProtocolError::Serialization(e.to_string()))?
-+            }
-+            CompressionFormat::Zstd => {
-+                let level = self.compression.level.min(22) as i32;
-+                zstd::encode_all(&encoded[..], level)
-+                    .map_err(|e| ProtocolError::Serialization(e.to_string()))?
-+            }
-+        };
-+
-+        if compressed.len() > MAX_MESSAGE_SIZE {
-+            return Err(ProtocolError::MessageTooLarge(
-+                compressed.len(),
-+                MAX_MESSAGE_SIZE,
-+            ));
-+        }
-+
-+        Ok(compressed)
-     }
  
-     /// Deserialize bytes into a value.
-@@ -228,7 +299,25 @@
-     where
-         T: for<'de> Deserialize<'de>,
-     {
--        let value = match self.format {
-+        // Decompress if needed
-+        let decompressed = match self.compression.format {
-+            CompressionFormat::None => bytes.to_vec(),
-+            CompressionFormat::Gzip => {
-+                let mut decoder = flate2::read::GzDecoder::new(bytes);
-+                let mut decompressed = Vec::new();
-+                decoder.read_to_end(&mut decompressed)
-+                    .map_err(|e| ProtocolError::Deserialization(e.to_string()))?;
-+                decompressed
-+            }
-+            CompressionFormat::Zstd => {
-+                let mut decoder = zstd::stream::read::Decoder::new(bytes)
-+                    .map_err(|e| ProtocolError::Deserialization(e.to_string()))?;
-+                let mut decompressed = Vec::new();
-+                decoder.read_to_end(&mut decompressed)
-+                    .map_err(|e| ProtocolError::Deserialization(e.to_string()))?;
-+                decompressed
 +
+ class SyslogParser(LogParser):
+     """Parser for syslog-formatted lines."""
+ 
+@@ -181,6 +189,7 @@ def parse(self, line: str) -> Optional[Dict[str, Any]]:
+             'raw': line,
+         }
+ 
++
+ # ---------------------------------------------------------------------------
+ # AGGREGATOR
+ # ---------------------------------------------------------------------------
+@@ -191,6 +200,7 @@ def __init__(self):
+         self.records: List[Dict[str, Any]] = []
+         self.errors: List[Dict[str, Any]] = []
+         self.stats = defaultdict(lambda: defaultdict(int))
++        self.parse_errors: List[Dict[str, Any]] = []
+ 
+     def add_record(self, record: Dict[str, Any]) -> None:
+         self.records.append(record)
+@@ -202,6 +212,9 @@ def add_error(self, error: Dict[str, Any]) -> None:
+         self.errors.append(error)
+         self.stats['errors'][error.get('type', 'unknown')] += 1
+ 
++    def add_parse_error(self, error: Dict[str, Any]) -> None:
++        self.parse_errors.append(error)
++
+     def group_by(self, key: str) -> Dict[str, List[Dict[str, Any]]]:
+         groups = defaultdict(list)
+         for record in self.records:
+@@ -215,6 +228,7 @@ def summary(self) -> Dict[str, Any]:
+             'total_errors': len(self.errors),
+             'group_counts': {k: len(v) for k, v in self.group_by('service').items()},
+             'level_counts': dict(self.stats['levels']),
++            'parse_error_count': len(self.parse_errors),
+         }
+ 
+ # ---------------------------------------------------------------------------
+@@ -223,7 +237,7 @@ def summary(self) -> Dict[str, Any]:
+ 
+ def detect_parser(file_path: str) -> LogParser:
+     """Detect the appropriate parser based on file extension and content sampling."""
+-    ext = os.path.splitext(file_path)[1].lower()
++    ext = Path(file_path).suffix.lower()
+ 
+     # Check for gzip
+     if ext == '.gz':
+@@ -249,7 +263,7 @@ def detect_parser(file_path: str) -> LogParser:
+             return PlainTextLogParser()
+ 
+     # Default to plain text for unknown extensions
+-    return PlainTextLogParser()
++    return PlainTextLogParser()
+ 
+ 
+ def read_log_file(file_path: str):
+@@ -268,7 +282,7 @@ def read_log_file(file_path: str):
+         yield from f
+ 
+ 
+-def process_file(file_path: str, aggregator: LogAggregator) -> Dict[str, Any]:
++def process_file(file_path: str, aggregator: LogAggregator, parse_error_report: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+     """Process a single log file and add records to the aggregator."""
+     parser = detect_parser(file_path)
+     stats = {
+@@ -280,14 +294,33 @@ def process_file(file_path: str, aggregator: LogAggregator) -> Dict[str, Any]:
+ 
+     for line_num, line in enumerate(read_log_file(file_path), 1):
+         line = line.rstrip('\n\r')
+-        record = parser.parse(line)
+-        if record:
+-            aggregator.add_record(record)
+-            stats['parsed'] += 1
+-        else:
++        try:
++            record = parser.parse(line)
++            if record:
++                aggregator.add_record(record)
++                stats['parsed'] += 1
++            else:
++                stats['failed'] += 1
++        except Exception as e:
+             stats['failed'] += 1
++            error_info = {
++                'file': file_path,
++                'line_number': line_num,
++                'parser_type': type(parser).__name__,
++                'error': _sanitize_error(str(e)),
++            }
++            aggregator.add_parse_error(error_info)
++            if parse_error_report is not None:
++                parse_error_report.append(error_info)
+ 
+     return stats
+ 
+ 
++def _sanitize_error(error_msg: str) -> str:
++    """Remove potentially sensitive information from error messages."""
++    sanitized = error_msg
++    for pattern in SECRET_PATTERNS:
++        sanitized
