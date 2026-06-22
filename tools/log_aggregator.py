@@ -163,7 +163,7 @@ class NginxLogParser(LogParser):
     def parse(self, line: str) -> Optional[Dict[str, Any]]:
         """Parse an nginx access log line. Returns None if parsing fails."""
         # Combined log format
-        nginx_pattern = r'^(\S+)\s+(\S+)\s+(\S+)\s\
+        nginx_pattern = r'^(\S+)\s+(\S+)\s+(\S+)\s+\
         r'(\S+)\s+'
         r'\[([^\]]+)\]\s+'
         r'"([^"]*)"\s+'
