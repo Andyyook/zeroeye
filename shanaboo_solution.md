@@ -4,26 +4,28 @@
 @@ -1,6 +1,7 @@
  // Serialization utilities for the Tent of Trials protocol.
  //
- // This module provides serialization and deserialization functions for
-+
+-// This module provides serialization and deserialization functions for
++// This module provides serialization and deserialization functions for
  // the various protocol message formats. It supports multiple encoding
  // formats and handles version negotiation, schema validation, and
  // backward compatibility.
-@@ -30,9 +31,13 @@
+@@ -30,10 +31,14 @@
  // Actual performance varies by hardware, message size, and schema complexity.
  
  use serde::{Deserialize, Serialize};
-+use std::io::{Read, Write};
- use serde_json;
+-use serde_json;
++use serde_json;
  use std::collections::HashMap;
++use std::io::{Read, Write};
  
+ use super::{ProtocolError, MAX_MESSAGE_SIZE};
 +use flate2::read::GzDecoder;
 +use flate2::write::GzEncoder;
 +use flate2::Compression as FlateCompression;
- use super::{ProtocolError, MAX_MESSAGE_SIZE};
  
  // ---------------------------------------------------------------------------
-@@ -95,6 +100,34 @@
+ // ENCODING FORMAT
+@@ -97,6 +102,37 @@
      }
  }
  
@@ -57,11 +59,15 @@
 +    }
 +}
 +
++// Default compression level used when not specified
++const DEFAULT_COMPRESSION_LEVEL: i32 = 6;
++
  // ---------------------------------------------------------------------------
  // SERIALIZER
  // ---------------------------------------------------------------------------
-@@ -103,6 +136,8 @@
+@@ -105,6 +141,8 @@
      format: EncodingFormat,
+,
      pretty: bool,
      schema_registry_url: Option<String>,
 +    compression: CompressionFormat,
@@ -69,17 +75,17 @@
      custom_encoders: HashMap<String, Box<dyn Fn(&serde_json::Value) -> Result<Vec<u8>, String> + Send + Sync>>,
      custom_decoders: HashMap<String, Box<dyn Fn(&[u8]) -> Result<serde_json::Value, String> + Send + Sync>>,
  }
-@@ -113,6 +148,8 @@
+@@ -114,6 +152,8 @@
+         Self {
              format,
              pretty: false,
-             schema_registry_url: None,
 +            compression: CompressionFormat::None,
-+            compression_level: 6,
++            compression_level: DEFAULT_COMPRESSION_LEVEL,
+             schema_registry_url: None,
              custom_encoders: HashMap::new(),
              custom_decoders: HashMap::new(),
-         }
-@@ -126,6 +163,16 @@
-         self.schema_registry_url = Some(url);
+@@ -128,6 +168,16 @@
+         self.pretty = enabled;
          self
      }
 +    
@@ -93,98 +99,94 @@
 +        self
 +    }
  
-     pub fn format(&self) -> EncodingFormat {
-         self.format
-@@ -135,6 +182,14 @@
-         self.pretty
+     pub fn with_schema_registry(mut self, url: impl Into<String>) -> Self {
+         self.schema_registry_url = Some(url.into());
+@@ -152,6 +202,14 @@
+         &self.format
      }
  
-+    pub fn compression(&self) -> CompressionFormat {
-+        self.compression
++    pub fn compression(&self) -> &CompressionFormat {
++        &self.compression
 +    }
 +
 +    pub fn compression_level(&self) -> i32 {
 +        self.compression_level
 +    }
 +
-     pub fn add_custom_encoder<F>(&mut self, name: &str, encoder: F)
-     where
-         F: Fn(&serde_json::Value) -> Result<Vec<u8>, String> + Send + Sync + 'static,
-@@ -155,6 +210,7 @@
+     pub fn is_pretty(&self) -> bool {
+         self.pretty
+     }
+@@ -176,7 +234,7 @@
      where
          T: Serialize,
      {
-+        // First serialize to bytes according to format
-         let bytes = match self.format {
+-        let bytes = match self.format {
++        let serialized_bytes = match self.format {
              EncodingFormat::Json => {
                  if self.pretty {
-@@ -174,7 +230,37 @@
+                     serde_json::to_string_pretty(value)
+@@ -202,9 +260,44 @@
              }
          };
  
 -        if bytes.len() > MAX_MESSAGE_SIZE {
-+        // Then compress if enabled
-+        let compressed = match self.compression {
-+            CompressionFormat::None => bytes,
++        // Apply compression if enabled
++        let final_bytes = match self.compression {
++            CompressionFormat::None => serialized_bytes,
 +            CompressionFormat::Gzip => {
-+                let level = match self.compression_level {
-+                    1..=9 => flate2::Compression::new(self.compression_level as u32),
-+                    _ => flate2::Compression::default(),
-+                };
-+                let mut encoder = GzEncoder::new(Vec::new(), level);
-+                encoder.write_all(&bytes).map_err(|e| ProtocolError::SerializationError(e.to_string()))?;
-+                encoder.finish().map_err(|e| ProtocolError::SerializationError(e.to_string()))?
++                let level = self.compression_level.clamp(1, 9);
++                let compression = FlateCompression::new(level as u32);
++                let mut encoder = GzEncoder::new(Vec::new(), compression);
++                encoder.write_all(&serialized_bytes)
++                    .map_err(|e| ProtocolError::SerializationError(format!("Gzip compression failed: {}", e)))?;
++                encoder.finish()
++                    .map_err(|e| ProtocolError::SerializationError(format!("Gzip compression failed: {}", e)))?
 +            }
 +            CompressionFormat::Zstd => {
-+                #[cfg(feature = "zstd")]
-+                {
-+                    let level = self.compression_level.clamp(1, 22);
-+                    zstd::encode_all(&bytes[..], level).map_err(|e| ProtocolError::SerializationError(e.to_string()))?
-+                }
-+                #[cfg(not(feature = "zstd"))]
-+                {
-+                    return Err(ProtocolError::SerializationError(
-+                        "Zstd compression not available. Enable the 'zstd' feature.".to_string()
-+                    ));
-+                }
++                let level = self.compression_level.clamp(1, 22);
++                zstd::encode_all(&serialized_bytes[..], level)
++                    .map_err(|e| ProtocolError::SerializationError(format!("Zstd compression failed: {}", e)))?
 +            }
 +        };
 +
-+        // Add compression format header (1 byte) + original data
-+        let mut final_bytes = vec![self.compression as u8];
-+        final_bytes.extend_from_slice(&compressed);
-+
 +        if final_bytes.len() > MAX_MESSAGE_SIZE {
              return Err(ProtocolError::MessageTooLarge {
-                 size: bytes.len(),
+-                size: bytes.len(),
++                size: final_bytes.len(),
                  max: MAX_MESSAGE_SIZE,
-@@ -182,7 +268,7 @@
+             });
          }
+@@ -213,7 +306,7 @@
+             e
+         })?;
  
-         // TODO: Add metrics for serialization time and size
 -        Ok(bytes)
 +        Ok(final_bytes)
      }
  
-     /// Deserialize a message from bytes.
-@@ -191,6 +277,28 @@
+     /// Deserialize a value from bytes.
+@@ -221,7 +314,25 @@
      where
          T: for<'de> Deserialize<'de>,
      {
-+        if data.is_empty() {
-+            return Err(ProtocolError::SerializationError("Empty data".to_string()));
-+        }
-+
-+        // First byte indicates compression format
-+        let compression_format = CompressionFormat::from_u32(data[0] as u32)
-+            .unwrap_or(CompressionFormat::None);
-+        
-+        let payload = &data[1..];
-+        
-+        // Decompress if needed
-+        let decompressed = match compression_format {
-+            CompressionFormat::None => payload.to_vec(),
+-        let value = match self.format {
++        // Decompress if needed based on compression format
++        let decompressed_bytes = match self.compression {
++            CompressionFormat::None => bytes.to_vec(),
 +            CompressionFormat::Gzip => {
-+                let mut decoder = GzDecoder::new(payload);
-+                let mut result = Vec::new();
-+                decoder.read_to_end(&mut result).map_err(|e| ProtocolError::SerializationError(e.to_string()))
++                let mut decoder = GzDecoder::new(bytes);
++                let mut decompressed = Vec::new();
++                decoder.read_to_end(&mut decompressed)
++                    .map_err(|e| ProtocolError::DeserializationError(format!("Gzip decompression failed: {}", e)))?;
++                decompressed
++            }
++            CompressionFormat::Zstd => {
++                zstd::decode_all(bytes)
++                    .map_err(|e| ProtocolError::DeserializationError(format!("Zstd decompression failed: {}", e)))?
++            }
++        };
++
++        let value = match self.format {
+             EncodingFormat::Json => {
+                 serde_json::from_slice(bytes).map_err(|e| {
+                     ProtocolError::DeserializationError(format!("JSON deserialization error:
