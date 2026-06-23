@@ -1,180 +1,185 @@
  ```diff
---- a/backend/src/protocol/serialize.rs
-+++ b/backend/src/protocol/serialize.rs
-@@ -1,6 +1,7 @@
- // Serialization utilities for the Tent of Trials protocol.
- //
--// This module provides serialization and deserialization functions for
-+// This module provides serialization and deserialization functions for
- // the various protocol message formats. It supports multiple encoding
- // formats and handles version negotiation, schema validation, and
- // backward compatibility.
-@@ -30,10 +31,14 @@
- // Actual performance varies by hardware, message size, and schema complexity.
+--- a/tools/config_generator.py
++++ b/tools/config_generator.py
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python3
++#!/usr/bin/env python3
+ """
+ Configuration file generator for the Tent of Trials platform.
+ Generates configuration files for different environments from templates.
+@@ -30,7 +30,7 @@
+ from datetime import datetime
+ from pathlib import Path
+ from typing import Any, Dict, List, Optional
+-
++import copy
+ try:
+     import yaml
+     HAS_YAML = True
+@@ -42,7 +42,6 @@
+ except ImportError:
+     HAS_TOML = False
  
- use serde::{Deserialize, Serialize};
-+use std::io::{Read, Write};
- use serde_json;
- use std::collections::HashMap;
- 
- use super::{ProtocolError, MAX_MESSAGE_SIZE};
- 
-+use flate2::read::GzDecoder;
-+use flate2::write::GzEncoder;
-+use flate2::Compression as GzCompressionLevel;
-+
- // ---------------------------------------------------------------------------
- // ENCODING FORMAT
- // ---------------------------------------------------------------------------
-@@ -94,6 +99,40 @@
-     }
+-
+ # ---------------------------------------------------------------------------
+ # CONFIGURATION SCHEMA
+ # ---------------------------------------------------------------------------
+@@ -160,7 +159,7 @@
+         "password_require_uppercase": True,
+     },
+     "monitoring": {
+-        "metrics_enabled": True,
++        "metrics_enabled": True,
+         "metrics_port": 9090,
+         "tracing_enabled": True,
+         "tracing_sample_rate": 0.1,
+@@ -183,7 +182,7 @@
+     },
  }
  
-+// ---------------------------------------------------------------------------
-+// COMPRESSION FORMAT
-+// ---------------------------------------------------------------------------
-+
-+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-+pub enum CompressionFormat {
-+    None = 0,
-+    Gzip = 1,
-+    Zstd = 2,
-+}
-+
-+impl CompressionFormat {
-+    pub fn from_u32(value: u32) -> Option<Self> {
-+        match value {
-+            0 => Some(CompressionFormat::None),
-+            1 => Some(CompressionFormat::Gzip),
-+            2 => Some(CompressionFormat::Zstd),
-+            _ => None,
-+        }
-+    }
-+
-+    pub fn name(&self) -> &str {
-+        match self {
-+            CompressionFormat::None => "None",
-+            CompressionFormat::Gzip => "Gzip",
-+            CompressionFormat::Zstd => "Zstd",
-+        }
-+    }
-+}
-+
-+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-+pub struct CompressionConfig {
-+    pub format: CompressionFormat,
-+    pub level: u32, // 1-9 for gzip, 1-22 for zstd
-+}
-+
- // ---------------------------------------------------------------------------
- // SERIALIZER
- // ---------------------------------------------------------------------------
-@@ -102,6 +141,8 @@
-     format: EncodingFormat,
-     pretty: bool,
-     schema_registry_url: Option<String>,
-+    compression: CompressionConfig,
-     custom_encoders: HashMap<String, Box<dyn Fn(&serde_json::Value) -> Result<Vec<u8>, String> + Send + Sync>>,
-     custom_decoders: HashMap<String, Box<dyn Fn(&[u8]) -> Result<serde_json::Value, String> + Send + Sync>>,
- }
-@@ -111,6 +152,11 @@
-         Self {
-             format,
-             pretty: false,
-+            compression: CompressionConfig {
-+                format: CompressionFormat::None,
-+                level: 0,
-+            },
-             schema_registry_url: None,
-             custom_encoders: HashMap::new(),
-             custom_decoders: HashMap::new(),
-@@ -122,6 +168,16 @@
-         self
-     }
+-ENV_OVERRIDES: Dict[str, Dict[str,
++ENV_OVERRIDES: Dict[str, Dict[str, Any]] = {
+     "development": {
+         "app": {
+             "environment": "development",
+@@ -244,7 +243,7 @@
+             "mfa_required": True,
+             "max_login_attempts": 3,
+             "lockout_duration_minutes": 30,
+-        },
++        },
+         "monitoring": {
+             "metrics_enabled": True,
+             "tracing_enabled": True,
+@@ -Suppressing further ENV_OVERRIDES content for brevity; assume it continues with staging and production overrides.
+@@ -252,7 +251,7 @@
+ # SENSITIVE KEYS
+ # ---------------------------------------------------------------------------
  
-+    pub fn with_compression(mut self, format: CompressionFormat, level: u32) -> Self {
-+        self.compression = CompressionConfig { format, level };
-+        self
-+    }
-+
-+    pub fn set_compression(&mut self, format: CompressionFormat, level: u32) {
-+        self.compression = CompressionConfig { format, level };
-+    }
-+
-     pub fn with_schema_registry(mut self, url: impl Into<String>) -> Self {
-         self.schema_registry_url = Some(url.into());
-         self
-@@ -140,6 +196,14 @@
-         self.format
-     }
+-SENSITIVE_KEYS: List[str] = [
++SENSITIVE_KEYS: List[str] = [
+     "database.password",
+     "redis.password",
+     "auth.jwt_secret",
+@@ -260,7 +259,6 @@
+     "auth.jwt_secret",
+     "auth.jwt_secret",
+ ]
+-
  
-+    pub fn compression(&self) -> CompressionConfig {
-+        self.compression
-+    }
-+
-+    pub fn set_compression_config(&mut self, config: CompressionConfig) {
-+        self.compression = config;
-+    }
-+
-     pub fn add_custom_encoder<F>(&mut self, name: &str, encoder: F)
-     where
-         F: Fn(&serde_json::Value) -> Result<Vec<u8>, String> + Send + Sync + 'static,
-@@ -157,7 +221,7 @@
-     where
-         T: Serialize,
-     {
--        let bytes = match self.format {
-+        let mut bytes = match self.format {
-             EncodingFormat::Json => {
-                 if self.pretty {
-                     serde_json::to_vec_pretty(value).map_err(|e| ProtocolError::Serialization(e.to_string()))?
-@@ -181,6 +245,31 @@
-             }
-         };
+ # ---------------------------------------------------------------------------
+ # HELPER FUNCTIONS
+@@ -268,7 +266,7 @@
  
-+        // Apply compression if enabled
-+        if self.compression.format != CompressionFormat::None {
-+            bytes = self.compress(&bytes)?;
-+        }
+ def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+     """Recursively merge override into base. Nested dicts are merged, not replaced."""
+-    result = base.copy()
++    result = copy.deepcopy(base)
+     for key, value in override.items():
+         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+             result[key] = deep_merge(result[key], value)
+@@ -278,7 +276,7 @@
+ 
+ 
+ def mask_sensitive(config: Dict[str, Any], sensitive_keys: List[str]) -> Dict[str, Any]:
+-    """Return a copy of config with sensitive values replaced by '***MASKED***'."""
++    """Return a deep copy of config with sensitive values replaced by '***MASKED***'."""
+     result = copy.deepcopy(config)
+     for key_path in sensitive_keys:
+         keys = key_path.split(".")
+@@ -293,7 +291,7 @@
+ 
+ 
+ def generate_config(env: str) -> Dict[str, Any]:
+-    """Generate configuration for a given environment."""
++    """Generate configuration for a given environment by merging defaults with overrides."""
+     base = copy.deepcopy(DEFAULT_CONFIG)
+     overrides = ENV_OVERRIDES.get(env, {})
+     if overrides:
+@@ -302,7 +300,7 @@
+ 
+ 
+ def format_config(config: Dict[str, Any], fmt: str) -> str:
+-    """Format configuration as the specified output format."""
++    """Format configuration as the specified output format (yaml, json, toml, dotenv, k8s-configmap)."""
+     if fmt == "yaml":
+         if not HAS_YAML:
+             raise ImportError("PyYAML is required for YAML output. Install with: pip install pyyaml")
+@@ -350,7 +348,7 @@
+ 
+ 
+ def main() -> None:
+-    parser = argparse.ArgumentParser(description="Generate configuration files for Tent of Trials")
++    parser = argparse.ArgumentParser(description="Generate configuration files for Tent of Trials.")
+     parser.add_argument("--env", required=True, choices=["development", "staging", "production"],
+                         help="Target environment")
+     parser.add_argument("--format", default="yaml", choices=["yaml", "json", "toml", "dotenv", "k8s-configmap"],
+@@ -疏远
+@@ -358,7 +356,7 @@
+     parser.add_argument("--mask", action="store_true", help="Mask sensitive values in output")
+     args = parser.parse_args()
+ 
+-    config = generate_config(args.env)
++    config = generate_config(args.env)
+     if args.mask:
+         config = mask_sensitive(config, SENSITIVE_KEYS)
+ 
+@@ -370,7 +368,7 @@
+         f.write(output)
+     print(f"Configuration written to {output_path}")
+ 
+-
+ if __name__ == "__main__":
+     main()
 +
-+        if bytes.len() > MAX_MESSAGE_SIZE {
-+            return Err(ProtocolError::MessageTooLarge {
-+                size: bytes.len(),
-+                max: MAX_MESSAGE_SIZE,
-+            });
-+        }
+--- /dev/null
++++ b/tools/test_config_generator.py
+@@ -0,0 +1,1 @@
++#!/usr/bin/env python3
++"""Tests for tools/config_generator.py."""
 +
-+        Ok(bytes)
-+    }
++import copy
++import sys
++from pathlib import Path
 +
-+    /// Compress bytes according to the configured compression format.
-+    fn compress(&self, data: &[u8]) -> Result<Vec<u8>, ProtocolError> {
-+        match self.compression.format {
-+            CompressionFormat::None => Ok(data.to_vec()),
-+            CompressionFormat::Gzip => {
-+                let level = self.compression.level.min(9).max(1) as u32;
-+                let mut encoder = GzEncoder::new(Vec::new(), GzCompressionLevel::new(level as u64));
-+                encoder.write_all(data).map_err(|e| ProtocolError::Serialization(format!("gzip compression failed: {}", e)))?;
-+                encoder.finish().map_err(|e| ProtocolError::Serialization(format!("gzip compression failed: {}", e)))
-+            }
-+            CompressionFormat::Zstd => {
-+                let level = self.compression.level.min(22).max(1) as i32;
-+                zstd::encode_all(data, level).map_err(|e| ProtocolError::Serialization(format!("zstd compression failed: {}", e)))
-+            }
-+        }
-+    }
++# Ensure tools/ is on path for import
++sys.path.insert(0, str(Path(__file__).resolve().parent))
 +
-+    /// Decompress bytes according to the configured compression format.
-+    fn decompress(&self, data: &[u8]) -> Result<Vec<u8>, ProtocolError> {
-+        match self.compression.format {
-+            CompressionFormat::None => Ok(data.to_vec()),
-+            CompressionFormat::Gzip => {
-+                let mut decoder = GzDecoder::new(data);
-+                let mut result = Vec::new();
-+                decoder.read_to_end(&mut result).map_err(|e| ProtocolError::Serialization(format!("gzip decompression failed: {}", e)))?;
-+                Ok(result)
-+            }
-+            CompressionFormat::Zstd => {
-+                zstd::decode_all(data).map_err(|e| ProtocolError::Serialization(format!("zstd decompression failed: {}", e)))
-+            }
-+        }
++from config_generator import (
++    DEFAULT_CONFIG,
++    ENV_OVERRIDES,
++    SENSITIVE_KEYS,
++    deep_merge,
++    mask_sensitive,
++    generate_config,
++    format_config,
++)
++
++
++def test_generate_config_development():
++    config = generate_config("development")
++    assert config["app"]["environment"] == "development"
++    assert config["app"]["debug"] is True
++    assert config["app"]["log_level"] == "debug"
++    assert config["database"]["name"] == "tent_dev"
++    assert config["server"]["port"] == 8080
++
++
++def test_generate_config_staging():
++    config = generate_config("staging")
++    assert config["app"]["environment"] == "staging"
++    assert config["app"]["debug"] is False
++    assert config["app"]["log_level"] == "info"
++    assert config["database"]["name"] == "tent_staging"
++    assert config["server"]["port"] == 8080
++
++
++def test_generate_config_production():
++    config = generate_config("production")
++    assert config["app"]["environment"] == "production"
++    assert config["app"]["debug"] is False
++    assert config["app"]["log_level"] == "warning"
++    assert config["database"]["name"] == "tent_prod"
++    assert config["server"]["port"] == 443
++    assert config["auth"]["mfa_required"] is True
++    assert config["auth"]["max_login_attempts
