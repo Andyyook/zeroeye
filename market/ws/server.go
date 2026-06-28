@@ -49,7 +49,7 @@ func NewHub(logger *zap.Logger) *Hub {
 	logger     *zap.Logger
 	port       int
 	srv        *http.Server
-	allowedOrigins []string
+	upgradershm.Upgrader
 }
 
 func NewHub(logger *zap.Logger) *Hub {
