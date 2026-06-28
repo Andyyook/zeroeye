@@ -3,9 +3,10 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"sync"
+	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -13,17 +14,12 @@ import (
 	"github.com/tent-of-trials/market/types"
 	"go.uber.org/zap"
 )
+	"go.uber.org/zap"
+)
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
-}
 
 type Client struct {
 	hub      *Hub
-	conn     *websocket.Conn
-	send     chan []byte
 	subs     map[types.Symbol]struct{}
 	remote   string
 	mu       sync.Mutex
@@ -49,12 +45,13 @@ type Server struct {
 func NewHub(logger *zap.Logger) *Hub {
 	return &Hub{
 		clients:    make(map[*Client]struct{}),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan []byte, 256),
-		logger:     logger,
-	}
+	port   int
+	srv    *http.Server
+	allowedOrigins map[string]struct{}
+	upgrader   websocket.Upgrader
 }
+
+func NewHub(logger *zap.Logger) *Hub {
 
 func (h *Hub) Run() {
 	for {
@@ -96,12 +93,48 @@ func (h *Hub) Run() {
 }
 
 func NewServer(hub *Hub, engine *matching.MatchingEngine, logger *zap.Logger, port int) *Server {
-	return &Server{
-		hub:    hub,
-		engine: engine,
-		logger: logger,
-		port:   port,
+	s := &Server{
+		hub:            hub,
+		engine:         engine,
+		logger:         logger,
+		port:           port,
+		allowedOrigins: buildAllowedOrigins(),
 	}
+	s.upgrader = websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin:     s.checkOrigin,
+	}
+	return s
+}
+
+func buildAllowedOrigins() map[string]struct{} {
+	origins := map[string]struct{}{
+		"http://localhost":        {},
+		"https://localhost":       {},
+		"http://localhost:3000":   {},
+		"http://127.0.0.1":        {},
+		"https://127.0.0.1":       {},
+		"http://127.0.0.1:3000":   {},
+	}
+	if envOrigins := os.Getenv("MARKET_ALLOWED_ORIGINS"); envOrigins != "" {
+		for _, o := range strings.Split(envOrigins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins[o] = struct{}{}
+			}
+		}
+	}
+	return origins
+}
+
+func (s *Server) checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	_, ok := s.allowedOrigins[origin]
+	return ok
 }
 
 func (s *Server) Start() error {
@@ -127,13 +160,13 @@ func (s *Server) Stop() {
 	defer cancel()
 	s.srv.Shutdown(ctx)
 }
+}
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.logger.Error("websocket upgrade failed", zap.Error(err))
 		return
-	}
 
 	client := &Client{
 		hub:    s.hub,
