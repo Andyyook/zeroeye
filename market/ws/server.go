@@ -2,12 +2,12 @@ package ws
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
-	"sync"
-	"time"
+	"os"
+	"strings"
 
 	"github.com/gorilla/websocket"
 	"github.com/tent-of-trials/market/matching"
@@ -15,8 +15,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// Default allowed origins for local development.
-var defaultAllowedOrigins = []string{"http://localhost", "http://localhost:3000", "http://127.0.0.1", "http://127.0.0.1:3000"}
 
 type Client struct {
 	hub      *Hub
@@ -40,19 +38,19 @@ type Server struct {
 	hub    *Hub
 	engine *matching.MatchingEngine
 	logger *zap.Logger
+	logger *zap.Logger
 	port   int
 	srv    *http.Server
+	upgrader websocket.Upgrader
 }
 
 func NewHub(logger *zap.Logger) *Hub {
-	return &Hub{
-	logger     *zap.Logger
-	port       int
-	srv        *http.Server
-	upgradershm.Upgrader
-}
-
-func NewHub(logger *zap.Logger) *Hub {
+		clients:    make(map[*Client]struct{}),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		broadcast:  make(chan []byte, 256),
+		logger:     logger,
+	}
 }
 
 func (h *Hub) Run() {
@@ -81,55 +79,81 @@ func (h *Hub) Run() {
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
+			for client := range h.clients {
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(h.clients, client)
+				}
+			}
+			h.mu.RUnlock()
+		}
+	}
 }
 
 func NewServer(hub *Hub, engine *matching.MatchingEngine, logger *zap.Logger, port int) *Server {
-	// Read allowed origins from environment; falls back to safe local defaults.
-	return &Server{
-		hub:    hub,
-		engine: engine,
-		logger: logger,
-		port:   port,
-			h.mu.RUnlock()
-}
-
-func (s *Server) Start() error {
-	// Determine allowed origins: env var overrides defaults.
-	allowed := defaultAllowedOrigins
-	if envOrigins := os.Getenv("MARKET_ALLOWED_ORIGINS"); envOrigins != "" {
-		allowed = strings.Split(envOrigins, ",")
-		for i := range allowed {
-			allowed[i] = strings.TrimSpace(allowed[i])
+	allowedOrigins := getAllowedOrigins()
+	
+	checkOrigin := func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		
+		// No origin header - allow for non-browser clients
+		if origin == "" {
+			return true
 		}
+		
+		// Check against allowed origins
+		for _, allowed := range allowedOrigins {
+			if strings.EqualFold(origin, allowed) {
+				return true
+			}
+		}
+		
+		return false
 	}
-	s.allowedOrigins = allowed
-
+	
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
-		CheckOrigin: func(r *http.Request) bool {
-			origin := r.Header.Get("Origin")
-			if origin == "" {
-				// No origin header: allow for non-browser clients.
-				return true
-			}
-			for _, o := range s.allowedOrigins {
-				if subtle.ConstantTimeCompare([]byte(origin), []byte(o)) == 1 {
-					return true
-				}
-			}
-			return false
-		},
+		CheckOrigin:     checkOrigin,
 	}
-	s.upgrader = upgrader
+	
+	return &Server{
+		hub:      hub,
+		engine:   engine,
+		logger:   logger,
+		port:     port,
+		upgrader: upgrader,
+	}
+}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.handleWebSocket)
-	mux.HandleFunc("/health", s.handleHealth)
-		hub:    hub,
-		engine: engine,
-		logger: logger,
-		port:   port,
+// getAllowedOrigins returns the list of allowed origins for WebSocket connections.
+// It reads from the WS_ALLOWED_ORIGINS environment variable (comma-separated).
+// Defaults allow common local development origins.
+func getAllowedOrigins() []string {
+	envOrigins := os.Getenv("WS_ALLOWED_ORIGINS")
+	if envOrigins != "" {
+		var origins []string
+		for _, o := range strings.Split(envOrigins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
+		if len(origins) > 0 {
+			return origins
+		}
+	}
+	
+	// Default origins for local development
+	return []string{
+		"http://localhost",
+		"http://localhost:3000",
+		"http://localhost:8080",
+		"http://127.0.0.1",
+		"http://127.0.0.1:3000",
+		"http://127.0.0.1:8080",
 	}
 }
 
@@ -151,8 +175,6 @@ func (s *Server) Start() error {
 	return s.srv.ListenAndServe()
 }
 
-func (s *Server) Stop() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +182,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("websocket upgrade failed", zap.Error(err))
 		return
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
 		s.logger.Error("websocket upgrade failed", zap.Error(err))
 		return
 	}
