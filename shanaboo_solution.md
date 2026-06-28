@@ -1,141 +1,181 @@
  ```diff
---- a/tools/monitoring_setup.py
-+++ b/tools/monitoring_setup.py
-@@ -88,7 +88,7 @@
-     },
-     {
-         "name": "HighMemoryUsage",
--        "expr": "process_resident_memory_bytes / process_resident_memory_bytes > 0.9",
-+        "expr": "process_resident_memory_bytes / node_memory_MemTotal_bytes > 0.9",
-         "duration": "10m",
-         "severity": "warning",
-         "summary": "High memory usage on {{$labels.instance}}",
-@@ -350,6 +ins,21 @@
-         print(f"  Severity: {rule['severity']}")
-         print(f"  Summary: {rule['summary']}")
-         print()
-+    
-+    # Validate alert expressions for self-dividing patterns
-+    print("Validating alert expressions for self-dividing patterns...")
-+    for rule in RECOMMENDED_ALERT_RULES:
-+        expr = rule.get("expr", "")
-+        # Check for self-dividing pattern: same metric on both sides of division
-+        import re
-+        # Match pattern like "metric_name / metric_name" where metric_name is identical
-+        self_divide_pattern = r'(\w+)\s*/\s*\1(?!\w)'
-+        if re.search(self_divide_pattern, expr):
-+            print(f"ERROR: Self-dividing expression detected in rule '{rule['name']}': {expr}")
-+            print("This expression will always evaluate to 1 (for non-zero values) and is unreliable.")
-+            sys.exit(1)
-+    print("All alert expressions passed self-division validation.")
-+    print()
-+    
-     print("Dry run complete. No changes were made.")
-     print("To apply these changes, run without --dry-run.")
- 
-@@ -392,6 +407,17 @@
-         print(f"  Severity: {rule['severity']}")
-         print(f"  Summary: {rule['summary']}")
-         print()
-+    
-+    # Validate alert expressions for self-dividing patterns
-+    print("Validating alert expressions for self-dividing patterns...")
-+    for rule in RECOMMENDED_ALERT_RULES:
-+        expr = rule.get("expr", "")
-+        import re
-+        self_divide_pattern = r'(\w+)\s*/\s*\1(?!\w)'
-+        if re.search(self_divide_pattern, expr):
-+            print(f"ERROR: Self-dividing expression detected in rule '{rule['name']}': {expr}")
-+            sys.exit(1)
-+    print("All alert expressions passed self-division validation.")
-+    print()
- 
-     print(f"Successfully wrote {len(RECOMMENDED_ALERT_RULES)} alert rules to {output_file}")
-     return True
-@@ -434,6 +460,17 @@
-         print(f"  Severity: {rule['severity']}")
-         print(f"  Summary: {rule['summary']}")
-         print()
-+    
-+    # Validate alert expressions for self-dividing patterns
-+    print("Validating alert expressions for self-dividing patterns...")
-+    for rule in RECOMMENDED_ALERT_RULES:
-+        expr = rule.get("expr", "")
-+        import re
-+        self_divide_pattern = r'(\w+)\s*/\s*\1(?!\w)'
-+        if re.search(self_divide_pattern, expr):
-+            print(f"ERROR: Self-dividing expression detected in rule '{rule['name']}': {expr}")
-+            sys.exit(1)
-+    print("All alert expressions passed self-division validation.")
-+    print()
- 
-     print(f"Successfully wrote {len(RECOMMENDED_ALERT_RULES)} alert rules to {output_file}")
-     return True
-@@ -476,6 +513,17 @@
-         print(f"  Severity: {rule['severity']}")
-         print(f"  Summary: {rule['summary']}")
-         print()
-+    
-+    # Validate alert expressions for self-dividing patterns
-+    print("Validating alert expressions for self-dividing patterns...")
-+    for rule in RECOMMENDED_ALERT_RULES:
-+        expr = rule.get("expr", "")
-+        import re
-+        self_divide_pattern = r'(\w+)\s*/\s*\1(?!\w)'
-+        if re.search(self_divide_pattern, expr):
-+            print(f"ERROR: Self-dividing expression detected in rule '{rule['name']}': {expr}")
-+            sys.exit(1)
-+    print("All alert expressions passed self-division validation.")
-+    print()
- 
-     print(f"Successfully wrote {len(RECOMMENDED_ALERT_RULES)} alert rules to {output_file}")
-     return True
-@@ -518,6 +566,17 @@
-         print(f"  Severity: {rule['severity']}")
-         print(f"  Summary: {rule['summary']}")
-         print()
-+    
-+    # Validate alert expressions for self-dividing patterns
-+    print("Validating alert expressions for self-dividing patterns...")
-+    for rule in RECOMMENDED_ALERT_RULES:
-+        expr = rule.get("expr", "")
-+        import re
-+        self_divide_pattern = r'(\w+)\s*/\s*\1(?!\w)'
-+        if re.search(self_divide_pattern, expr):
-+            print(f"ERROR: Self-dividing expression detected in rule '{rule['name']}': {expr}")
-+            sys.exit(1)
-+    print("All alert expressions passed self-division validation.")
-+    print()
- 
-     print(f"Successfully wrote {len(RECOMMENDED_ALERT_RULES)} alert rules to {output_file}")
-     return True
-@@ -560,6 +619,17 @@
-         print(f"  Severity: {rule['severity']}")
-         print(f"  Summary: {rule['summary']}")
-         print()
-+    
-+    # Validate alert expressions for self-dividing patterns
-+    print("Validating alert expressions for self-dividing patterns...")
-+    for rule in RECOMMENDED_ALERT_RULES:
-+        expr = rule.get("expr", "")
-+        import re
-+        self_divide_pattern = r'(\w+)\s*/\s*\1(?!\w)'
-+        if re.search(self_divide_pattern, expr):
-+            print(f"ERROR: Self-dividing expression detected in rule '{rule['name']}': {expr}")
-+            sys.exit(1)
-+    print("All alert expressions passed self-division validation.")
-+    print()
- 
-     print(f"Successfully wrote {len(RECOMMENDED_ALERT_RULES)} alert rules to {output_file}")
-     return True
-@@ -602,6 +672,17 @@
-         print(f"  Severity: {rule['severity']}")
-         print(f"  Summary: {rule['summary']}")
-         print()
-+    
-+    # Validate alert expressions for self-dividing patterns
-+    print("Validating alert expressions for self-dividing patterns...")
-+    for rule in RECOMMENDED_ALERT_RULES:
-+        expr = rule.get("expr", "")
-+        import re
-+       
+--- /dev/null
++++ b/tools/verify_diagnostics.py
+@@ -0,0 +1,268 @@
++#!/usr/bin/env python3
++
++import argparse
++import json
++import os
++import subprocess
++import sys
++from pathlib import Path
++from typing import Any, Optional
++
++ROOT = Path(__file__).resolve().parent.parent
++DIAGNOSTIC_DIR = ROOT / "diagnostic"
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(
++        description="Verify build diagnostics and report results.",
++        formatter_class=argparse.RawDescriptionHelpFormatter,
++    )
++    parser.add_argument(
++        "--verbose",
++        action="store_true",
++        help="Enable verbose output.",
++    )
++    parser.add_argument(
++        "--json",
++        action="store_true",
++        help="Output results in JSON format for machine consumption.",
++    )
++    parser.add_argument(
++        "--threshold",
++        type=int,
++        default=0,
++        help="Minimum number of passing modules required (default: 0).",
++    )
++    return parser.parse_args()
++
++
++def find_diagnostic_files() -> tuple[list[Path], list[Path]]:
++    """Find all .logd and .json diagnostic files in the diagnostic directory."""
++    logd_files: list[Path] = []
++    json_files: list[Path] = []
++
++    if not DIAGNOSTIC_DIR.exists():
++        return logd_files, json_files
++
++    for path in DIAGNOSTIC_DIR.iterdir():
++        if path.is_file():
++            if path.suffix == ".logd":
++                logd_files.append(path)
++            elif path.suffix == ".json":
++                json_files.append(path)
++
++    return logd_files, json_files
++
++
++def validate_json_schema(data: Any) -> list[str]:
++    """Validate the structure of diagnostic metadata JSON and return list of errors."""
++    errors: list[str] = []
++
++    if not isinstance(data, dict):
++        errors.append("Root JSON must be an object")
++        return errors
++
++    required_keys = ["commit_id", "timestamp", "modules"]
++    for key in required_keys:
++        if key not in data:
++            errors.append(f"Missing required key: '{key}'")
++
++    if "modules" in data:
++        if not isinstance(data["modules"], list):
++            errors.append("'modules' must be a list")
++        else:
++            for i, module in enumerate(data["modules"]):
++                if not isinstance(module, dict):
++                    errors.append(f"Module at index {i} must be an object")
++                    continue
++                if "name" not in module:
++                    errors.append(f"Module at index {i} missing 'name'")
++                if "status" not in module:
++                    errors.append(f"Module at index {i} missing 'status'")
++
++    return errors
++
++
++def run_build(verbose: bool) -> tuple[bool, str]:
++    """Run the build script and return (success, error_message)."""
++    try:
++        cmd = [sys.executable, str(ROOT / "build.py")]
++        if verbose:
++            print(f"Running: {' '.join(cmd)}")
++
++        result = subprocess.run(
++            cmd,
++            cwd=str(ROOT),
++            capture_output=True,
++            text=True,
++            timeout=300,
++        )
++
++        if result.returncode != 0:
++            error_msg = f"Build failed with exit code {result.returncode}"
++            if result.stderr:
++                error_msg += f"\nStderr: {result.stderr.strip()}"
++            return False, error_msg
++
++        return True, ""
++
++    except subprocess.TimeoutExpired:
++        return False, "Build timed out after 300 seconds"
++    except FileNotFoundError:
++        return False, f"Build script not found: {ROOT / 'build.py'}"
++    except PermissionError:
++        return False, f"Permission denied executing: {ROOT / 'build.py'}"
++    except Exception as e:
++        return False, f"Unexpected error running build: {type(e).__name__}: {e}"
++
++
++def verify_diagnostics(args: argparse.Namespace) -> dict[str, Any]:
++    """Run diagnostics verification and return results."""
++    results: dict[str, Any] = {
++        "success": False,
++        "build_success": False,
++        "logd_files": [],
++        "json_files": [],
++        "schema_errors": [],
++        "passing_modules": 0,
++        "threshold_met": False,
++        "messages": [],
++    }
++
++    # Run build
++    build_success, build_error = run_build(args.verbose)
++    results["build_success"] = build_success
++
++    if not build_success:
++        results["messages"].append(f"Build failed: {build_error}")
++        if args.verbose:
++            print(f"ERROR: {build_error}")
++
++    # Find diagnostic files
++    logd_files, json_files = find_diagnostic_files()
++    results["logd_files"] = [str(f.name) for f in logd_files]
++    results["json_files"] = [str(f.name) for f in json_files]
++
++    # Validate JSON schema for each metadata file
++    for json_file in json_files:
++        try:
++            with open(json_file, "r", encoding="utf-8") as f:
++                data = json.load(f)
++
++            schema_errors = validate_json_schema(data)
++            if schema_errors:
++                for error in schema_errors:
++                    msg = f"Schema error in {json_file.name}: {error}"
++                    results["schema_errors"].append(msg)
++                    if args.verbose:
++                        print(f"ERROR: {msg}")
++            else:
++                if "modules" in data and isinstance(data["modules"], list):
++                    for module in data["modules"]:
++                        if isinstance(module, dict) and module.get("status") == "pass":
++                            results["passing_modules"] += 1
++        except json.JSONDecodeError as e:
++            msg = f"Invalid JSON in {json_file.name}: {e}"
++            results["schema_errors"].append(msg)
++            if args.verbose:
++                print(f"ERROR: {msg}")
++        except Exception as e:
++            msg = f"Error reading {json_file.name}: {type(e).__name__}: {e}"
++            results["schema_errors"].append(msg)
++            if args.verbose:
++                print(f"ERROR: {msg}")
++
++    # Check threshold
++    results["threshold_met"] = results["passing_modules"] >= args.threshold
++    results["success"] = build_success and results["threshold_met"]
