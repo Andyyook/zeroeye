@@ -3,10 +3,10 @@ package ws
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"net"
 	"net/http"
-	"os"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -14,12 +14,73 @@ import (
 	"github.com/tent-of-trials/market/types"
 	"go.uber.org/zap"
 )
-	"go.uber.org/zap"
+
+// AllowedOrigins holds the list of explicitly permitted WebSocket origins.
+// It is populated from the ALLOWED_ORIGINS environment variable (comma-separated).
+// If empty, local development origins are permitted by default.
+var AllowedOrigins []string
+
+func init() {
+	AllowedOrigins = parseAllowedOrigins()
+}
+
+func parseAllowedOrigins() []string {
+	origins := []string{
+		"http://localhost", "https://localhost",
+		"http://localhost:3000", "https://localhost:3000",
+		"http://127.0.0.1", "https://127.0.0.1",
+		"http://127.0.0.1:3000", "https://127.0.0.1:3000",
+	}
+	if env := os.Getenv("ALLOWED_ORIGINS"); env != "" {
+		origins = []string{}
+		for _, o := range strings.Split(env, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
+	}
+	return origins
+}
+
+// isOriginAllowed returns true if the given origin is in the allowed list.
+// An empty origin is treated as allowed (non-browser client).
+func isOriginAllowed(origin string) bool {
+	if origin == "" {
+		return true
+	}
+	for _, allowed := range AllowedOrigins {
+		if origin == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func newUpgrader() *websocket.Upgrader {
+	return &websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return isOriginAllowed(origin)
+		},
+	}
+}
+
+import (
+	"os"
+	"strings"
 )
 
+// upgrader is kept for backward compatibility; new code should use newUpgrader().
+var upgrader = newUpgrader()
 
 type Client struct {
 	hub      *Hub
+	conn     *websocket.Conn
+	conn     *websocket.Conn
+	send     chan []byte
 	subs     map[types.Symbol]struct{}
 	remote   string
 	mu       sync.Mutex
@@ -45,13 +106,12 @@ type Server struct {
 func NewHub(logger *zap.Logger) *Hub {
 	return &Hub{
 		clients:    make(map[*Client]struct{}),
-	port   int
-	srv    *http.Server
-	allowedOrigins map[string]struct{}
-	upgrader   websocket.Upgrader
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		broadcast:  make(chan []byte, 256),
+		logger:     logger,
+	}
 }
-
-func NewHub(logger *zap.Logger) *Hub {
 
 func (h *Hub) Run() {
 	for {
@@ -87,54 +147,18 @@ func (h *Hub) Run() {
 					delete(h.clients, client)
 				}
 			}
-			h.mu.RUnlock()
-		}
-	}
 }
 
-func NewServer(hub *Hub, engine *matching.MatchingEngine, logger *zap.Logger, port int) *Server {
-	s := &Server{
-		hub:            hub,
-		engine:         engine,
-		logger:         logger,
-		port:           port,
-		allowedOrigins: buildAllowedOrigins(),
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := newUpgrader().Upgrade(w, r, nil)
+	if err != nil {
+		s.logger.Error("websocket upgrade failed", zap.Error(err))
+		return
+		hub:    hub,
+		engine: engine,
+		logger: logger,
+		port:   port,
 	}
-	s.upgrader = websocket.Upgrader{
-		ReadBufferSize:  4096,
-		WriteBufferSize: 4096,
-		CheckOrigin:     s.checkOrigin,
-	}
-	return s
-}
-
-func buildAllowedOrigins() map[string]struct{} {
-	origins := map[string]struct{}{
-		"http://localhost":        {},
-		"https://localhost":       {},
-		"http://localhost:3000":   {},
-		"http://127.0.0.1":        {},
-		"https://127.0.0.1":       {},
-		"http://127.0.0.1:3000":   {},
-	}
-	if envOrigins := os.Getenv("MARKET_ALLOWED_ORIGINS"); envOrigins != "" {
-		for _, o := range strings.Split(envOrigins, ",") {
-			o = strings.TrimSpace(o)
-			if o != "" {
-				origins[o] = struct{}{}
-			}
-		}
-	}
-	return origins
-}
-
-func (s *Server) checkOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	_, ok := s.allowedOrigins[origin]
-	return ok
 }
 
 func (s *Server) Start() error {
@@ -160,13 +184,13 @@ func (s *Server) Stop() {
 	defer cancel()
 	s.srv.Shutdown(ctx)
 }
-}
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.logger.Error("websocket upgrade failed", zap.Error(err))
 		return
+	}
 
 	client := &Client{
 		hub:    s.hub,
