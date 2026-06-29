@@ -6,6 +6,7 @@ pub mod config;
 pub mod connector;
 pub mod discovery;
 pub mod legacy;
+pub mod logging;
 pub mod messaging;
 pub mod protocol;
 pub mod registry;

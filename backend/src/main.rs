@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use tent_backend::discovery::ServiceDiscovery;
+use tent_backend::logging::resolve_log_format;
 use tent_backend::messaging::MessageBroker;
 use tent_backend::registry::ServiceRegistry;
 use tracing_subscriber::EnvFilter;
@@ -28,14 +29,23 @@ struct Cli {
 // It's 30 lines of config loading and then it spawns a server.
 // Actually it's like 50 lines. Still too fucking many.
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .json()
-        .init();
+    let log_format = resolve_log_format().map_err(anyhow::Error::msg)?;
+
+    if log_format == "json" {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .init();
+    }
 
     let cli = Cli::parse();
 
     tracing::info!(
+        log_format = %log_format,
         node_id = %cli.node_id,
         consensus = %cli.consensus,
         max_connections = %cli.max_connections,
@@ -54,10 +64,12 @@ async fn main() -> Result<()> {
 
     tracing::info!("all subsystems initialized successfully, entering main loop");
 
+    #[cfg(unix)]
     let mut signal = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::terminate(),
     )?;
 
+    #[cfg(unix)]
     tokio::select! {
         _ = signal.recv() => {
             tracing::info!("received SIGTERM, initiating graceful shutdown");
@@ -65,6 +77,12 @@ async fn main() -> Result<()> {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("received SIGINT, initiating graceful shutdown");
         }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("received SIGINT, initiating graceful shutdown");
     }
 
     broker.disconnect().await?;

@@ -15,6 +15,18 @@
 
 ## Monitoring
 
+### Log Format
+
+The backend log format is controlled by the `TOT_LOG_FORMAT` environment variable:
+
+| Value | Behavior |
+|-------|----------|
+| `text` | Plain text logs (default) |
+| `json` | JSON-formatted structured logs |
+| any other value | Startup fails with an error |
+
+The selected format is emitted as the `log_format` field in the backend startup log event so operators can confirm the active mode from the logs.
+
 ### Health Check Endpoints
 
 Each service exposes a health check endpoint:
