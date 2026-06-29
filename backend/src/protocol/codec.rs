@@ -33,7 +33,7 @@ use std::io::{Cursor, Read, Write};
 pub const FRAME_MAGIC: u32 = 0x544F5446;
 
 /// Size of the frame header in bytes.
-pub const FRAME_HEADER_SIZE: usize = 24;
+pub const FRAME_HEADER_SIZE: usize = 20;
 
 /// Maximum frame payload size (16 MB).
 pub const FRAME_MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
